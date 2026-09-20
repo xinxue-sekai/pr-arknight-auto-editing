@@ -286,11 +286,13 @@ python pr_cli.py analyze --video "<你的录像.mp4>" --session-out "%TEMP%\s.js
 ### 提交前请跑一遍检查
 
 ```bash
-node tools/check.js         # 语法 / manifest 一致性 / 编码 / 浏览器兼容
-node tools/check-links.js   # 文档里的相对链接是否有效
+node tools/check.js          # 语法 / manifest 一致性 / 编码 / 浏览器兼容
+node tools/check-links.js    # 文档里的相对链接是否有效
+node tools/package.js        # 打包到 dist/（发布时才需要）
+node tools/verify-package.js # 校验打出来的包（须先跑上一条）
 ```
 
-这两条与 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一份代码，
+前两条与 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一份代码，
 本地过了 CI 基本就会过。检查项都是针对本项目踩过的坑：
 
 | 检查 | 为什么必须要 |
@@ -330,7 +332,9 @@ node tools/check-links.js   # 文档里的相对链接是否有效
 │   └── architecture.md          # 架构、单位约定、协议、错误码
 ├── tools/
 │   ├── check.js                 # 静态校验（与 CI 同一份，可本地跑）
-│   └── check-links.js           # 文档相对链接检查
+│   ├── check-links.js           # 文档相对链接检查
+│   ├── package.js               # 打包成可分发的 zip
+│   └── verify-package.js        # 校验打出来的包结构
 └── cep-extension/
     ├── CSXS/manifest.xml        # 扩展清单：PPRO [15.0,99.9]、CSXS 11.0
     ├── index.html               # 面板

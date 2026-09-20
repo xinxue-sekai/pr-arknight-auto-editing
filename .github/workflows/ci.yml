@@ -26,10 +26,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 设置 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -56,17 +56,6 @@ jobs:
 
       - name: 校验包结构
         # 解压后目录名必须等于 ExtensionBundle@Id，否则 CEP 静默不加载。
-        run: |
-          set -e
-          cd dist
-          unzip -q *.zip
-          DIR=$(ls -d */ | head -n1 | tr -d '/')
-          ID=$(grep -o 'ExtensionBundle[^>]*Id="[^"]*"' "$DIR/CSXS/manifest.xml" | sed 's/.*"\(.*\)"/\1/')
-          echo "包内目录名 = $DIR"
-          echo "manifest Id = $ID"
-          [ "$DIR" = "$ID" ] || { echo "不一致，CEP 会拒绝加载"; exit 1; }
-          test -f "$DIR/index.html"
-          test -f "$DIR/js/main.js"
-          test ! -e "$DIR/install"      # 安装器不该进包
-          test ! -e "$DIR/.debug"       # 调试端口不该进包
-          echo "包结构校验通过"
+        # 用 Node 脚本而不是 shell 的 unzip —— ubuntu-latest 不预装 unzip，
+        # 依赖系统工具会让这一步在干净 runner 上直接失败。
+        run: node tools/verify-package.js

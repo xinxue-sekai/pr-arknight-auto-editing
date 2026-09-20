@@ -153,36 +153,76 @@ if (path.basename(STAGE) !== EXT_ID) {
 const zipName = `${EXT_ID}-v${VERSION}${KEEP_DEBUG ? '-debug' : ''}.zip`;
 const zipPath = path.join(DIST, zipName);
 
-/** 跨平台 zip：优先用系统命令，都没有就报错（不引 npm 依赖）。 */
+/**
+ * 跨平台 zip：按顺序试各个可用工具，全都失败时把真实错误打出来。
+ *
+ * 注意 -a（按扩展名自动选格式）是 **bsdtar 专属**，GNU tar 不认，
+ * 所以不能无条件用 tar；这里按平台分别给参数。
+ */
 function makeZip() {
-    // -r 递归，-q 安静；cwd 设为 DIST 以保证压缩包里带扩展目录这一层
-    try {
-        execFileSync('zip', ['-r', '-q', zipName, EXT_ID], { cwd: DIST, stdio: 'pipe' });
-        return 'zip';
-    } catch (e) { /* 试下一个 */ }
+    const attempts = [];
 
+    // 1) zip 命令：Linux/macOS 上通常有，Windows 上一般没有
+    attempts.push({
+        name: 'zip',
+        cmd: 'zip',
+        args: ['-r', '-q', zipName, EXT_ID]
+    });
+
+    // 2) tar：Windows 自带 bsdtar，用 -a 让它按 .zip 后缀选格式；
+    //    Linux 上是 GNU tar，无 -a，需显式指定 zip 格式（依赖 libarchive 支持）
     if (process.platform === 'win32') {
-        // Windows 10+ 自带 tar（bsdtar），能直接产出 zip
-        try {
-            execFileSync('tar', ['-a', '-c', '-f', zipName, EXT_ID], { cwd: DIST, stdio: 'pipe' });
-            return 'tar';
-        } catch (e) { /* 试下一个 */ }
+        attempts.push({ name: 'tar (bsdtar -a)', cmd: 'tar',
+                        args: ['-a', '-c', '-f', zipName, EXT_ID] });
+    } else {
+        attempts.push({ name: 'tar (GNU, --format=zip)', cmd: 'tar',
+                        args: ['--format=zip', '-c', '-f', zipName, EXT_ID] });
     }
 
-    try {
-        execFileSync('powershell',
-            ['-NoProfile', '-Command',
-             `Compress-Archive -Path '${EXT_ID}' -DestinationPath '${zipName}' -Force`],
-            { cwd: DIST, stdio: 'pipe' });
-        return 'powershell';
-    } catch (e) { /* 全部失败 */ }
+    // 3) PowerShell Compress-Archive：仅 Windows
+    if (process.platform === 'win32') {
+        attempts.push({
+            name: 'Compress-Archive',
+            cmd: 'powershell',
+            args: ['-NoProfile', '-Command',
+                   `Compress-Archive -Path '${EXT_ID}' -DestinationPath '${zipName}' -Force`]
+        });
+    }
 
+    // 4) python -m zipfile：Python 3 标准库，覆盖面最广的兜底
+    for (const py of ['python3', 'python', 'py']) {
+        attempts.push({
+            name: `${py} -m zipfile`,
+            cmd: py,
+            args: py === 'py'
+                ? ['-3', '-m', 'zipfile', '-c', zipName, EXT_ID]
+                : ['-m', 'zipfile', '-c', zipName, EXT_ID]
+        });
+    }
+
+    const errors = [];
+    for (const a of attempts) {
+        try {
+            execFileSync(a.cmd, a.args, { cwd: DIST, stdio: 'pipe' });
+            if (fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0) {
+                return a.name;
+            }
+            errors.push(`${a.name}: 命令成功但未产出 zip`);
+        } catch (e) {
+            // 记下真实原因，最后一次性输出，避免「工具不可用」这种无用结论
+            const msg = (e.stderr || e.stdout || e.message || '')
+                .toString().trim().split('\n')[0];
+            errors.push(`${a.name}: ${msg}`);
+        }
+    }
+
+    console.error('\n打包失败：所有压缩方式都不可用。实际错误：');
+    for (const e of errors) { console.error('  - ' + e); }
     return null;
 }
 
 const tool = makeZip();
 if (!tool) {
-    console.error('\n打包失败：找不到可用的压缩工具（试过 zip / tar / Compress-Archive）');
     process.exit(1);
 }
 
