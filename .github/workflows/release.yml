@@ -1,0 +1,107 @@
+name: Release
+
+# 打 tag 即发布：把扩展打成 zip，创建 GitHub Release 并把 zip 作为 asset 上传。
+#
+# 发布方式：
+#   1. 改 cep-extension/CSXS/manifest.xml 里的 ExtensionBundle@Version
+#   2. git tag -a v0.2.0 -m "v0.2.0" && git push --follow-tags
+#
+# 注意 tag 名（去掉 v）与 manifest 的 Version 不一致时会直接失败 ——
+# 避免出现「下载的包自称 0.1.0、Release 却写着 v0.2.0」这种对不上的情况。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例如 v0.1.0），必须已经存在'
+        required: true
+
+permissions:
+  contents: write      # 创建 Release 需要
+
+jobs:
+  release:
+    name: 打包并发布
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 跑一遍静态校验
+        # 发布前必须过检查，避免把有问题的代码发出去
+        run: node tools/check.js
+
+      - name: 校验 tag 与 manifest 版本一致
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag = $TAG"
+          MANIFEST_VER=$(grep -o 'ExtensionBundle[^>]*Version="[^"]*"' \
+              cep-extension/CSXS/manifest.xml | sed 's/.*"\(.*\)"/\1/')
+          echo "manifest 版本 = $MANIFEST_VER"
+          if [ "$TAG" != "v$MANIFEST_VER" ]; then
+            echo "::error::tag ($TAG) 与 manifest 版本 (v$MANIFEST_VER) 不一致。" \
+                 "请先把 manifest 里的 Version 改成 $MANIFEST_VER 对应的值，或改 tag。"
+            exit 1
+          fi
+
+      - name: 打包
+        run: node tools/package.js
+
+      - name: 生成 Release 说明
+        run: |
+          set -e
+          VER=$(grep -o 'ExtensionBundle[^>]*Version="[^"]*"' \
+              cep-extension/CSXS/manifest.xml | sed 's/.*"\(.*\)"/\1/')
+          ZIP=$(ls dist/*.zip | head -n1)
+
+          cat > release-notes.md <<EOF
+          CEP 扩展包（未签名）。
+
+          ## 安装
+
+          1. 下载并解压 \`$(basename "$ZIP")\`，得到 \`com.arknight.autoediting\` 文件夹
+          2. 整个文件夹放进
+             \`%APPDATA%\\Adobe\\CEP\\extensions\\\`
+             最终路径应为
+             \`…\\Roaming\\Adobe\\CEP\\extensions\\com.arknight.autoediting\\CSXS\\manifest.xml\`
+          3. 开启未签名扩展的调试模式：把 \`PlayerDebugMode\`（字符串 \`1\`）写入
+             \`HKCU\\Software\\Adobe\\CSXS.10\`、\`.11\`、\`.12\`
+          4. 重启 Premiere Pro，然后打开
+             \`窗口 → 扩展 → Arknight Auto Editing\`
+
+          ## 还需要准备分析器
+
+          本扩展**不含**视频分析能力。分析器是独立的第三方项目，
+          需要自行获取并在面板的「环境设置」里指定其目录。
+          详见仓库 README 的「准备分析器」一节。
+
+          ## 已知情况
+
+          版本 \`$VER\`。ExtendScript 落地链路（\`createSubClip\` → 拼装序列）
+          尚未在真实的 Premiere Pro 上完成验证，遇到问题欢迎开 issue 反馈
+          \`checkCapabilities\` 的输出。
+          EOF
+
+          cat release-notes.md
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true

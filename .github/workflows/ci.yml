@@ -1,0 +1,72 @@
+name: CI
+
+# 本仓库是「源码即产物」的 CEP 扩展：没有编译、打包、转译步骤，
+# 因此 CI 不产出任何构建物，只做静态校验 —— 而且全部检查在几秒内跑完。
+#
+# 检查项都是真实踩过的坑，不是泛泛的 lint：
+#   · CEP 11（PR 2021）内嵌 Chromium 74，一个 ?. 就能让整个面板白屏
+#   · install.ps1 缺 UTF-8 BOM 时，PowerShell 5.1 按 GBK 解析，中文乱码 + 语法错误
+#   · manifest 的 Id 与 install.ps1 的 $ExtId 不一致时，扩展被装进 CEP 不认的目录
+#
+# 复现本地检查：node tools/check.js
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 静态校验
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 显示环境信息
+        run: |
+          node --version
+          echo "---"
+          echo "仓库内容："
+          git ls-files
+
+      - name: 运行检查
+        run: node tools/check.js
+
+      - name: 检查文档相对链接
+        # README / docs 里引用了不少相对路径，改名或删文件后很容易留下死链。
+        # 这一步只验证「被引用的本地文件确实存在」，不做完整 Markdown lint。
+        run: node tools/check-links.js
+
+      - name: 试打包
+        # package.js 里有一组「打包前校验」（必需文件齐备、目录名必须等于
+        # manifest 的 Id）。这里跑一次，保证发布时不会打出一个装不上的包。
+        # 产物不上传 —— 真正的发布由 tag 触发（见 release.yml）。
+        run: node tools/package.js
+
+      - name: 校验包结构
+        # 解压后目录名必须等于 ExtensionBundle@Id，否则 CEP 静默不加载。
+        run: |
+          set -e
+          cd dist
+          unzip -q *.zip
+          DIR=$(ls -d */ | head -n1 | tr -d '/')
+          ID=$(grep -o 'ExtensionBundle[^>]*Id="[^"]*"' "$DIR/CSXS/manifest.xml" | sed 's/.*"\(.*\)"/\1/')
+          echo "包内目录名 = $DIR"
+          echo "manifest Id = $ID"
+          [ "$DIR" = "$ID" ] || { echo "不一致，CEP 会拒绝加载"; exit 1; }
+          test -f "$DIR/index.html"
+          test -f "$DIR/js/main.js"
+          test ! -e "$DIR/install"      # 安装器不该进包
+          test ! -e "$DIR/.debug"       # 调试端口不该进包
+          echo "包结构校验通过"

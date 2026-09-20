@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>明日方舟自动剪辑</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ============ 状态栏 ============ -->
+<div id="statusbar">
+    <span id="dot" class="dot dot-unknown"></span>
+    <span id="status-text">正在初始化…</span>
+</div>
+
+<div id="host-info" class="muted small"></div>
+
+<!-- ============ 素材与分析 ============ -->
+<section class="block">
+    <label class="lbl" for="video-path">源素材</label>
+    <div class="row">
+        <input id="video-path" type="text" placeholder="在 Premiere 中选中素材后点「从 PR 获取」" spellcheck="false">
+    </div>
+    <div class="row">
+        <button id="btn-pick" class="btn">从 PR 获取</button>
+        <button id="btn-analyze" class="btn btn-primary">开始分析</button>
+        <button id="btn-cancel" class="btn" disabled>取消</button>
+    </div>
+    <div id="candidates" class="row wrap"></div>
+    <div class="progress-wrap">
+        <div id="progress-bar" class="progress-bar"></div>
+    </div>
+    <div id="progress-text" class="muted small">就绪</div>
+</section>
+
+<!-- ============ 时间轴 ============ -->
+<section class="block">
+    <canvas id="timeline"></canvas>
+    <div class="hint">滚轮缩放 · 中键/Shift+左键平移 · 左键选中 · 右键切换保留/删除 · 拖动亮青手柄</div>
+    <div class="legend">
+        <span><i style="background:rgb(100,200,50)"></i>保留</span>
+        <span><i style="background:rgb(68,51,0)"></i>自动删除</span>
+        <span><i style="background:rgb(180,50,50)"></i>手动删除</span>
+        <span><i style="background:rgb(32,178,170)"></i>clip 保留区</span>
+    </div>
+</section>
+
+<!-- ============ 暂停段控制 ============ -->
+<section class="block">
+    <div id="selected-info" class="muted small">未选中任何暂停片段</div>
+    <div class="row">
+        <button class="btn seg-btn" data-mode="keep">全部保留</button>
+        <button class="btn seg-btn" data-mode="auto">按设置裁剪</button>
+        <button class="btn seg-btn" data-mode="all">全部裁剪</button>
+    </div>
+    <div class="row">
+        <span class="lbl-inline">批量：</span>
+        <button class="btn btn-sm batch-btn" data-mode="keep">全部保留</button>
+        <button class="btn btn-sm batch-btn" data-mode="auto">全部自动</button>
+        <button class="btn btn-sm batch-btn" data-mode="all">全部裁剪</button>
+    </div>
+</section>
+
+<!-- ============ 统计与落地 ============ -->
+<section class="block">
+    <div id="stats" class="stats muted small">尚未分析</div>
+    <div class="row">
+        <button id="btn-apply" class="btn btn-primary" disabled>落地到 Premiere</button>
+        <button id="btn-edl" class="btn" disabled>导出 EDL</button>
+        <button id="btn-import-edl" class="btn" disabled>导入 EDL</button>
+    </div>
+    <div class="row">
+        <label class="lbl-inline" for="seq-name">序列名</label>
+        <input id="seq-name" type="text" value="明日方舟自动剪辑" spellcheck="false">
+    </div>
+    <div class="row">
+        <label class="lbl-inline" for="edl-path">EDL 路径</label>
+        <input id="edl-path" type="text" placeholder="导出 EDL 后自动填入" spellcheck="false">
+    </div>
+    <div class="row">
+        <label class="chk"><input id="opt-markers" type="checkbox" checked>写入变速标记</label>
+        <label class="chk"><input id="opt-open" type="checkbox" checked>落地后打开序列</label>
+    </div>
+</section>
+
+<!-- ============ 参数 ============ -->
+<details class="block" id="sec-params">
+    <summary>分析参数</summary>
+
+    <div class="sub">匹配阈值（模板相似度，0.1~1.0）</div>
+    <div class="grid2">
+        <label>暂停 <input id="p-thr-pause" type="number" step="0.01" min="0.1" max="1" value="0.7"></label>
+        <label>1x <input id="p-thr-1x" type="number" step="0.01" min="0.1" max="1" value="0.7"></label>
+        <label>2x <input id="p-thr-2x" type="number" step="0.01" min="0.1" max="1" value="0.7"></label>
+        <label>0.2x <input id="p-thr-02x" type="number" step="0.01" min="0.1" max="1" value="0.7"></label>
+    </div>
+
+    <div class="sub">暂停处理</div>
+    <div class="grid2">
+        <label>静止缓冲(秒) <input id="p-still" type="number" step="0.01" min="0.01" max="2" value="0.1"></label>
+        <label>动作灵敏度 <input id="p-motion" type="number" step="0.5" min="0.1" max="50" value="2.0"></label>
+        <label>无操作阈值 <input id="p-boundary" type="number" step="0.5" min="0" max="50" value="5.0"></label>
+    </div>
+    <div class="note">无操作阈值：暂停前后画面差异小于此值 → 判定为「玩家什么都没做」→ 整段全删</div>
+
+    <div class="sub">变速提示（Premiere 插件 API 无法直接改速度，故用标记提示手动设置）</div>
+    <div class="grid2">
+        <label>1x 区间建议 <input id="p-sp1x" type="number" step="10" min="100" max="1000" value="200">%</label>
+        <label>2x 区间建议 <input id="p-sp2x" type="number" step="10" min="100" max="1000" value="100">%</label>
+        <label>0.2x 区间建议 <input id="p-sp02x" type="number" step="50" min="100" max="2000" value="500">%</label>
+    </div>
+
+    <div class="sub">性能</div>
+    <div class="grid2">
+        <label>处理宽度 <input id="p-procw" type="number" step="10" min="100" max="1920" value="400"></label>
+        <label>批处理大小 <input id="p-batch" type="number" step="1" min="1" max="512" value="128"></label>
+        <label>线程数 <input id="p-threads" type="number" step="1" min="1" max="64" value="0"></label>
+    </div>
+    <div class="note">处理高度留空则按源素材宽高比自动推算。线程数填 0 表示用满全部核心。</div>
+
+    <div class="row">
+        <label class="lbl-inline" for="p-backend">解码后端</label>
+        <select id="p-backend">
+            <option value="opencv">OpenCV（默认，最稳）</option>
+            <option value="ffmpeg_sw_passthrough">FFmpeg 软件灰度 A_PT（实验，更快）</option>
+        </select>
+    </div>
+
+    <div class="row">
+        <button id="btn-recompute" class="btn" disabled>按当前参数重算</button>
+    </div>
+</details>
+
+<!-- ============ 设置 ============ -->
+<details class="block" id="sec-settings">
+    <summary>环境设置</summary>
+    <div class="row">
+        <label class="lbl-inline" for="s-python">Python</label>
+        <input id="s-python" type="text" placeholder="留空 = 自动探测 py -3 / python / python3" spellcheck="false">
+    </div>
+    <div class="row">
+        <label class="lbl-inline" for="s-clidir">分析器目录</label>
+        <input id="s-clidir" type="text" placeholder="留空 = 自动定位 pr_cli.py 所在目录" spellcheck="false">
+    </div>
+    <div class="row">
+        <button id="btn-save-cfg" class="btn">保存设置</button>
+        <button id="btn-check" class="btn">重新检测环境</button>
+    </div>
+    <div id="env-report" class="note"></div>
+</details>
+
+<!-- ============ 日志 ============ -->
+<details class="block" id="sec-log">
+    <summary>日志</summary>
+    <pre id="log"></pre>
+</details>
+
+<script src="js/csinterface.js"></script>
+<script src="js/bridge.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

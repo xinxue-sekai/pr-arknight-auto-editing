@@ -1,0 +1,29 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# ---- 第三方分析器（不要提交）----
+# 分析器是别人的项目，本仓库不分发它。本地调试时若把它放在扩展同级目录
+# （扩展会优先在那里找），下面这条能防止误提交。
+arknight-auto-editing-main/
+
+# ---- 本地临时产物 ----
+_tmp_test/
+# tools/package.js 的输出：发布时才生成，不入库（作为 Release asset 上传）
+dist/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.swp
+
+# ---- CEP 相关 ----
+# .debug 是调试端口配置，需要随仓库分发（用于 Chrome DevTools），故不忽略。
+# 若把扩展打包成 .zxp 发布，签名产物请放在 dist/ 下。

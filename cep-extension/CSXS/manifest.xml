@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CEP 扩展清单
+
+  兼容性说明
+    Host Name="PPRO" Version="[15.0,99.9]"
+      覆盖 Premiere Pro 15.x(2021) ~ 26.x(2026) 及以后。
+      注意：UXP 需要 25.6+，而本清单走 CEP 路线，因此 25.3 等版本同样可用。
+
+    RequiredRuntime CSXS Version="11.0"
+      即 CEP 11 起。CEP 12(PR 25.0+) 向下兼容。
+
+    CEFCommandLine 参数（注意：XML 注释内不能出现连续两个连字符，
+    故此处参数名省略前导横线，实际取值见下方 Parameter 节点）
+      enable-nodejs   开启 Node.js，用于 child_process 调用 Python
+      mixed-context   让 Node 全局对象与浏览器全局对象处于同一上下文，
+                      这样 require() 与 window/document 可以混用。
+                      CEP 11 自带 Node 12，CEP 12 自带 Node 17.7.1，
+                      故本扩展仅使用两者都稳定支持的 Node API。
+-->
+<ExtensionBundle Id="com.arknight.autoediting" Version="1.0.0"
+                 xmlns="http://ns.adobe.com/AdobeExtensionBundle/1.0">
+
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="PPRO" Version="[15.0,99.9]" />
+    </HostList>
+    <LocaleList>
+      <Locale Code="All" />
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="11.0" />
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+
+  <DispatchInfoList>
+    <Extension Id="com.arknight.autoediting.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./hostscript.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+          </CEFCommandLine>
+        </Resources>
+
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+
+        <UI>
+          <Type>Panel</Type>
+          <!-- 菜单名用 ASCII，规避部分 CEP 版本对非 ASCII 清单的编码问题；
+               面板内部界面仍为中文。 -->
+          <Menu>Arknight Auto Editing</Menu>
+          <Geometry>
+            <Size>
+              <Height>640</Height>
+              <Width>420</Width>
+            </Size>
+            <MinSize>
+              <Height>380</Height>
+              <Width>300</Width>
+            </MinSize>
+            <MaxSize>
+              <Height>2000</Height>
+              <Width>1200</Width>
+            </MaxSize>
+          </Geometry>
+          <Icons />
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+
+</ExtensionBundle>

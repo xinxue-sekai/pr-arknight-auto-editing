@@ -1,0 +1,18 @@
+# ------------------------------------------------------------------
+#  换行符策略
+#
+#  本仓库分发的是 Windows 脚本（.bat / .ps1 / .reg），换行符不能听天由命：
+#  cmd.exe 对 LF 结尾的批处理容错性差，而 GitHub 的 ZIP 下载与在
+#  非 Windows 上做的 clone，都不会套用你本地的 core.autocrlf 设置。
+# ------------------------------------------------------------------
+
+* text=auto
+
+# cmd.exe 需要可靠的 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Windows 原生工具链的习惯；也避免行尾变化与 install.ps1 的
+# UTF-8 BOM 要求叠加出难查的问题
+*.ps1 text eol=crlf
+*.reg text eol=crlf

@@ -1,0 +1,34 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================
+;  Enable CEP PlayerDebugMode for unsigned extensions
+;
+;  Effect: allows Premiere Pro to skip Adobe signature checks
+;          and load extension source code directly from disk.
+;
+;  Why three keys: each CEP generation reads its own CSXS key.
+;    CSXS.10 -> Premiere Pro 2020 (14.x)
+;    CSXS.11 -> Premiere Pro 2021 ~ 2024 (15.x ~ 24.x)
+;    CSXS.12 -> Premiere Pro 2025 ~ 2026 (25.x ~ 26.x)
+;
+;  Usage: double-click this file -> confirm -> restart Premiere.
+;         install.ps1 already performs the same action; this file
+;         is provided for manual troubleshooting only.
+;
+;  Security note: this setting makes Premiere load ANY unsigned
+;  CEP extension. For distribution, sign the extension with
+;  ZXPSignCmd instead and do NOT rely on debug mode.
+;
+;  This file is intentionally ASCII-only: regedit.exe parses .reg
+;  files using the system ANSI code page for the comment body,
+;  so non-ASCII text would display as mojibake on some systems.
+; ============================================================
+
+[HKEY_CURRENT_USER\Software\Adobe\CSXS.10]
+"PlayerDebugMode"="1"
+
+[HKEY_CURRENT_USER\Software\Adobe\CSXS.11]
+"PlayerDebugMode"="1"
+
+[HKEY_CURRENT_USER\Software\Adobe\CSXS.12]
+"PlayerDebugMode"="1"
