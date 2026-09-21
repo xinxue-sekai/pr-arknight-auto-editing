@@ -18,7 +18,7 @@
                       CEP 11 自带 Node 12，CEP 12 自带 Node 17.7.1，
                       故本扩展仅使用两者都稳定支持的 Node API。
 -->
-<ExtensionBundle Id="com.arknight.autoediting" Version="1.0.0"
+<ExtensionBundle Id="com.arknight.autoediting" Version="0.1.0"
                  xmlns="http://ns.adobe.com/AdobeExtensionBundle/1.0">
 
   <ExecutionEnvironment>
