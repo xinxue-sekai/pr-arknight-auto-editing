@@ -128,6 +128,12 @@ frame_types.py  ← 帧类型常量
 
 复制采用「先整份复制到暂存的 `xxx.new`、成功后再替换」的方式：写入失败时**旧版本不会被破坏**。
 
+> **两种分发形态**：Release 里通常同时有 `.zip` 与 `.zxp`。zip 按上文手动放置
+> （需要开 `PlayerDebugMode`）；zxp 用任意 ZXP 安装器（ZXP Installer、
+> Anastasiy Extension Manager 等）双击安装，不用开调试模式，但因为是
+> **每次发布临时生成的自签名证书**，安装时会提示「发布者不受信任」。
+> 没有顺手的 ZXP 安装器就用 zip，两者内容一致。
+
 > **不要**把 `.\install.bat` 连同行尾的 `# 注释` 一起复制粘贴进 PowerShell。
 > PowerShell 不支持行内 `#` 注释，整个字符串会被当成参数，必然报错。
 
@@ -344,7 +350,8 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 │   ├── test-bridge.js           # bridge.js 行为测试
 │   ├── check-links.js           # 文档相对链接检查
 │   ├── package.js               # 打包成可分发的 zip
-│   └── verify-package.js        # 校验打出来的包结构
+│   ├── verify-package.js        # 校验打出来的包结构
+│   └── make-zxp.js              # 签名为 .zxp（可选分发形态）
 └── cep-extension/
     ├── CSXS/manifest.xml        # 扩展清单：PPRO [15.0,99.9]、CSXS 11.0
     ├── index.html               # 面板

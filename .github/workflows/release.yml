@@ -60,6 +60,12 @@ jobs:
       - name: 打包
         run: node tools/package.js
 
+      - name: 签名 zxp
+        # 临时自签名证书，用完即删 —— 私钥与密码不进仓库、不进 secrets。
+        # 自签名的代价：用户安装时会看到「发布者不受信任」提示；
+        # zip 仍是主推分发方式，zxp 只是给 ZXP 安装器用户的可选形态。
+        run: node tools/make-zxp.js
+
       - name: 生成 Release 说明
         run: |
           set -e
@@ -100,7 +106,9 @@ jobs:
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/*.zxp
           body_path: release-notes.md
           draft: false
           prerelease: false
