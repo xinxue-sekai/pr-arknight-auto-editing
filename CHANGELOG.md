@@ -52,6 +52,13 @@
 
 ### Fixed
 
+- 面板在真实 Premiere 25.3 上首跑暴露的三个问题（2026-11-07 真机验证修复）：
+  - `evalScript` 走错宿主 API（`invokeAsync`）导致环境检测 Promise 永久卡死，
+    改为官方实现直接调 `host.evalScript`
+  - 路径常量写成大写 `EXTENSION`，原生层只认小写 `extension`，
+    导致扩展目录解析返回 Invalid Input Params
+  - `install.ps1` 在 PS 5.1 下写出的 `config.json` 带 UTF-8 BOM，
+    面板端 `JSON.parse` 失败被吞、用户配置被静默忽略
 - CI 在 ubuntu-latest 上依赖不预装的 `unzip` 导致的失败
   （改为零依赖的 Node 包校验脚本）
 - Windows 上的打包缺陷：GNU tar `-a` 对 `.zip` 后缀不报错、静默产出纯 tar；
