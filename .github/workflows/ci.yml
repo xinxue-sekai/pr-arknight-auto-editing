@@ -1,14 +1,18 @@
 name: CI
 
 # 本仓库是「源码即产物」的 CEP 扩展：没有编译、打包、转译步骤，
-# 因此 CI 不产出任何构建物，只做静态校验 —— 而且全部检查在几秒内跑完。
+# 因此 CI 不产出任何构建物，只做静态校验与行为测试 —— 而且全部在几秒内跑完。
 #
 # 检查项都是真实踩过的坑，不是泛泛的 lint：
 #   · CEP 11（PR 2021）内嵌 Chromium 74，一个 ?. 就能让整个面板白屏
 #   · install.ps1 缺 UTF-8 BOM 时，PowerShell 5.1 按 GBK 解析，中文乱码 + 语法错误
 #   · manifest 的 Id 与 install.ps1 的 $ExtId 不一致时，扩展被装进 CEP 不认的目录
 #
-# 复现本地检查：node tools/check.js
+# 复现本地检查：
+#   node tools/check.js          静态校验
+#   node tools/check-links.js    文档相对链接
+#   node tools/test-bridge.js    bridge.js 行为测试
+#   node tools/package.js        试打包（配合 verify-package.js）
 
 on:
   push:
@@ -21,7 +25,7 @@ permissions:
 
 jobs:
   check:
-    name: 静态校验
+    name: 静态校验与测试
     runs-on: ubuntu-latest
 
     steps:
@@ -42,6 +46,12 @@ jobs:
 
       - name: 运行检查
         run: node tools/check.js
+
+      - name: bridge.js 行为测试
+        # 用真实子进程流覆盖 NDJSON 的全部边界：末行无换行、单行跨 chunk、
+        # UTF-8 多字节被拆开、超大 JSON、stderr 噪声、取消/超时/错误码。
+        # 测试自带隔离的临时 HOME，不碰真实 ~/.arknight-pr。
+        run: node tools/test-bridge.js
 
       - name: 检查文档相对链接
         # README / docs 里引用了不少相对路径，改名或删文件后很容易留下死链。

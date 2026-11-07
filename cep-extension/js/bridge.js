@@ -482,6 +482,7 @@
         checkDeps,
         resolveCliDir,
         cancel,
+        runCli,
         probe,
         analyze,
         recompute,
