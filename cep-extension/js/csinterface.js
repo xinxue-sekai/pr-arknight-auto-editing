@@ -23,9 +23,11 @@
         this.available = !!host;
     }
 
-    CSInterface.EXTENSION = 'EXTENSION';
-    CSInterface.HOST_APPLICATION = 'HOST_APPLICATION';
-    CSInterface.USER_DATA = 'USER_DATA';
+    // 官方 CSInterface 的路径类型常量是小写字符串，PlugPlug 原生层按此匹配。
+    // 传大写会得到 "Invalid Input Params"（2026-11-07 真机踩过）。
+    CSInterface.EXTENSION = 'extension';
+    CSInterface.HOST_APPLICATION = 'hostApplication';
+    CSInterface.USER_DATA = 'userData';
 
     /**
      * 在 Premiere 的 ExtendScript 引擎里执行脚本。
@@ -34,11 +36,14 @@
      */
     CSInterface.prototype.evalScript = function (script, callback) {
         var cb = (typeof callback === 'function') ? callback : function () {};
-        if (!host) {
+        if (!host || typeof host.evalScript !== 'function') {
             cb('__CSINTERFACE_UNAVAILABLE__');
             return;
         }
-        host.invokeAsync('evalScript', script, cb);
+        // 官方 CSInterface 就是直接调宿主注入的 evalScript 方法。
+        // invokeAsync 的参数签名与 evalScript 无关，用它回调永远不会触发，
+        // 上层 Promise 会永远 pending（真机踩过）。
+        host.evalScript(script, cb);
     };
 
     /** 取扩展自身安装目录 / 宿主程序目录 / 用户数据目录的绝对路径。 */

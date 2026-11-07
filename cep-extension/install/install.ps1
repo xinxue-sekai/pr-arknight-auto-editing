@@ -342,9 +342,11 @@ if (-not $AnalyzerDir) {
         $cfg = [PSCustomObject]@{ pythonPath = $null; cliDir = $AnalyzerDir }
     }
 
-    # ConvertTo-Json 结果默认写 UTF-16 LE，面板端 fs.readFileSync('utf8') 读不了，
-    # 必须用 -Encoding UTF8 写回
-    $cfg | ConvertTo-Json -Depth 5 | Set-Content -Path $CfgFile -Encoding UTF8
+    # ConvertTo-Json 结果默认写 UTF-16 LE，面板端 fs.readFileSync('utf8') 读不了；
+    # 而 Set-Content -Encoding UTF8 在 PS 5.1 里必带 BOM，JSON.parse 也不认
+    # —— 所以用 .NET API 显式写不带 BOM 的 UTF-8（2026-11-07 真机踩过）
+    $json = $cfg | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($CfgFile, $json, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host ('[OK] 已写入配置 ' + $CfgFile) -ForegroundColor Green
 }
 

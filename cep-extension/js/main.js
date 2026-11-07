@@ -543,6 +543,9 @@
     async function checkEnv(silent) {
         status('正在检测环境…', 'busy');
         const lines = [];
+        // 每完成一步就落一行日志：整段跑完才输出的话，卡在某一步时
+        // 面板上什么线索都没有（真机踩过：检测卡死 + 日志空白）
+        const emit = l => { lines.push(l); log('env| ' + l); };
         let ok = true;
 
         // 1) Node / CEP
@@ -550,41 +553,43 @@
         // 空值合并运算符。本文件其余地方也必须保持 Chromium 74 可解析的
         // 语法，否则整个面板直接白屏。
         const chromeVer = (window.navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || '?';
-        lines.push(`Node ${process.versions.node} · Chromium ${chromeVer}`);
+        const nodeVer = (typeof process !== 'undefined' && process.versions && process.versions.node)
+            ? process.versions.node : '（不可用）';
+        emit(`Node ${nodeVer} · Chromium ${chromeVer}`);
 
         // 2) Python
         const py = await B.detectPython(true);
         if (py && py.exe) {
-            lines.push(`Python: ${py.exe} ${py.preArgs.join(' ')} → ${py.version}`);
+            emit(`Python: ${py.exe} ${py.preArgs.join(' ')} → ${py.version}`);
         } else {
             ok = false;
-            lines.push('Python: 未找到。请安装 Python 3.10+，或在下方手动指定解释器路径。');
-            if (py && py.tried) lines.push('  已尝试: ' + py.tried.join(' / '));
+            emit('Python: 未找到。请安装 Python 3.10+，或在下方手动指定解释器路径。');
+            if (py && py.tried) emit('  已尝试: ' + py.tried.join(' / '));
         }
 
         // 3) 分析器目录
         const cliDir = B.getState().cliDir;
         if (cliDir) {
-            lines.push(`分析器: ${cliDir}`);
+            emit(`分析器: ${cliDir}`);
         } else {
             ok = false;
-            lines.push('分析器: 找不到 pr_cli.py 与 analyzer.py。请在下方指定分析器目录。');
+            emit('分析器: 找不到 pr_cli.py 与 analyzer.py。请在下方指定分析器目录。');
         }
 
         // 4) Python 依赖（只检查插件路径必需的 numpy / cv2）
         if (py && py.exe) {
             const deps = await B.checkDeps();
             if (deps.ok) {
-                lines.push('依赖: numpy / opencv 就绪');
+                emit('依赖: numpy / opencv 就绪');
                 if (deps.optionalMissing && deps.optionalMissing.length) {
-                    lines.push('  可选依赖未装: ' + deps.optionalMissing.join(', ') +
+                    emit('  可选依赖未装: ' + deps.optionalMissing.join(', ') +
                                '（仅原独立版导出/界面需要，插件不影响使用）');
                 }
             } else {
                 ok = false;
-                lines.push('必需依赖缺失: ' + (deps.missing && deps.missing.length
+                emit('必需依赖缺失: ' + (deps.missing && deps.missing.length
                     ? deps.missing.join(', ') : deps.error));
-                lines.push('  修复: 在分析器目录执行  pip install numpy opencv-python');
+                emit('  修复: 在分析器目录执行  pip install numpy opencv-python');
             }
         }
 
@@ -592,23 +597,22 @@
         try {
             const caps = await jsx('checkCapabilities');
             const c = caps.checks || {};
-            lines.push(`Premiere ${caps.appVersion}: createSubClip=${yn(c.createSubClip)} ` +
+            emit(`Premiere ${caps.appVersion}: createSubClip=${yn(c.createSubClip)} ` +
                        `createNewSequenceFromClips=${yn(c.createNewSequenceFromClips)} ` +
                        `markers=${yn(c.markers)} importFiles=${yn(c.importFiles)}`);
             if (!c.createSubClip || !c.createNewSequenceFromClips) {
-                lines.push('  ⚠ 关键 API 缺失，「落地到 Premiere」可能失败，建议改用 EDL 路径。');
+                emit('  ⚠ 关键 API 缺失，「落地到 Premiere」可能失败，建议改用 EDL 路径。');
             }
-            lines.push(`  QE DOM=${yn(c.qeDom)}（本插件不依赖，仅供参考）`);
+            emit(`  QE DOM=${yn(c.qeDom)}（本插件不依赖，仅供参考）`);
         } catch (e) {
             ok = false;
-            lines.push('Premiere: 无法通信 —— ' + e.message);
-            lines.push('  请确认本面板是通过 Premiere 的「窗口 → 扩展」打开的，而非在浏览器里直接打开 index.html。');
+            emit('Premiere: 无法通信 —— ' + e.message);
+            emit('  请确认本面板是通过 Premiere 的「窗口 → 扩展」打开的，而非在浏览器里直接打开 index.html。');
         }
 
         $('env-report').innerHTML = lines.map(l =>
             l.startsWith('  ') ? `<span class="muted">${esc(l)}</span>` : esc(l)
         ).join('<br>');
-        lines.forEach(l => log('env| ' + l));
 
         status(ok ? '环境就绪' : '环境存在问题（详见设置页）', ok ? 'ok' : 'err');
         if (!ok && !silent) $('sec-settings').open = true;
@@ -644,6 +648,33 @@
     //  初始化
     // ------------------------------------------------------------------
 
+    /**
+     * 取扩展安装目录。getSystemPath 在参数/宿主不配合时会返回错误串
+     * （真机返回 "Invalid Input Params"），所以先验证结果再采信；
+     * 不行就退回面板自身 URL 的目录 —— CEP 面板必然是从
+     * <扩展目录>/index.html 加载的，这条路永远可用。
+     */
+    function resolveExtDir() {
+        const viaCep = cs.getSystemPath(CSInterface.EXTENSION);
+        if (viaCep && !/Invalid|Error/i.test(viaCep) && B.fileExists(viaCep + '/CSXS/manifest.xml')) {
+            return viaCep;
+        }
+        try {
+            // file:///C:/.../com.arknight.autoediting/index.html → 扩展目录
+            let p = decodeURIComponent(window.location.pathname.replace(/\/[^/]*$/, ''));
+            if (navigator.platform.indexOf('Win') === 0) {
+                p = p.replace(/^\//, '').replace(/\//g, '\\');
+            }
+            return p;
+        } catch (e) {
+            return viaCep || '';
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  初始化
+    // ------------------------------------------------------------------
+
     function bindEvents() {
         $('btn-pick').addEventListener('click', pickFromPR);
         $('btn-analyze').addEventListener('click', startAnalyze);
@@ -660,7 +691,7 @@
             B.saveConfig({ pythonPath: py || null, cliDir: dir || null });
             // 重新解析，让新配置立刻生效
             B.getState().python = null;
-            B.init(cs.getSystemPath(CSInterface.EXTENSION));
+            B.init(resolveExtDir());
             $('s-python').value = B.getConfig().pythonPath || '';
             $('s-clidir').value = B.getConfig().cliDir || '';
             log('设置已保存到 ' + B.paths.CONFIG_PATH);
@@ -704,7 +735,7 @@
             return;
         }
 
-        const extDir = cs.getSystemPath(CSInterface.EXTENSION);
+        const extDir = resolveExtDir();
         B.init(extDir);
 
         // 回填已保存的配置
@@ -719,7 +750,15 @@
         bindEvents();
         log('面板已加载，扩展目录: ' + extDir);
 
-        const ok = await checkEnv(true);
+        // checkEnv 任何一步异常都不该让面板停在中间状态（真机踩过：
+        // 检测卡死时状态栏永远停在「正在检测环境…」）
+        let ok = false;
+        try {
+            ok = await checkEnv(true);
+        } catch (e) {
+            status('环境检测失败', 'err');
+            log('checkEnv 异常: ' + e.message);
+        }
         if (ok) {
             status('环境就绪，请从 Premiere 获取素材', 'ok');
             // 自动读一次宿主信息，多数情况下用户已经选中了素材

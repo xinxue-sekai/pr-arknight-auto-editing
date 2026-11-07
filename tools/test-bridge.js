@@ -161,6 +161,14 @@ test('saveConfig / getConfig 持久化', async () => {
     assert.ok(bridge.paths.CONFIG_PATH.startsWith(TMP), 'config 应写在隔离的家目录里');
 });
 
+test('loadConfig 兼容带 BOM 的 config.json（PS 5.1 的 install.ps1 会写出）', async () => {
+    fs.writeFileSync(bridge.paths.CONFIG_PATH,
+        '\ufeff{"cliDir":"X:\\\\from-bom","pythonPath":null}', 'utf8');
+    bridge.init('some-ext-dir');   // init 内部走 loadConfig
+    assert.strictEqual(bridge.getConfig().cliDir, 'X:\\from-bom',
+        '带 BOM 的配置不应被静默忽略');
+});
+
 test('fileExists：存在与不存在', async () => {
     assert.strictEqual(bridge.fileExists(TMP), true);
     assert.strictEqual(bridge.fileExists(path.join(TMP, 'no_such_file')), false);

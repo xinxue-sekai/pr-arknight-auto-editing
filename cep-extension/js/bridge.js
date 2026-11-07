@@ -95,7 +95,10 @@
 
     function loadConfig() {
         try {
-            return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+            // install.ps1（PS 5.1）写出的文件可能带 UTF-8 BOM，必须剥掉，
+            // 否则 JSON.parse 抛错被 catch 吞掉，用户配置被静默忽略
+            const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+            return JSON.parse(raw.replace(/^\uFEFF/, ''));
         } catch (e) {
             return {};
         }
