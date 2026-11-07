@@ -167,6 +167,9 @@ test('loadConfig 兼容带 BOM 的 config.json（PS 5.1 的 install.ps1 会写�
     bridge.init('some-ext-dir');   // init 内部走 loadConfig
     assert.strictEqual(bridge.getConfig().cliDir, 'X:\\from-bom',
         '带 BOM 的配置不应被静默忽略');
+    // init 会按新 config 重算并清空 cliPath/python 派生字段，
+    // 必须恢复现场，否则后续 runCli 系列测试全部 NO_CLI
+    setup();
 });
 
 test('fileExists：存在与不存在', async () => {
