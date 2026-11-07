@@ -77,5 +77,7 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 - 面板「环境设置」区里 `checkCapabilities` 的完整输出
 - 面板日志区的内容（必要时含 stderr 尾部）
 
-ExtendScript 落地链路至今未在真实 Premiere 上验证过——你的第一手反馈
-就是判断版本兼容性的唯一依据。
+项目已完成 Premiere 真机验证（2026-11-08 获使用者确认），当前已记录的
+测试版本为 25.3.0。涉及落地行为或版本兼容性的改动，请记录实际测试的
+Premiere 版本、素材条件、`checkCapabilities` 输出与面板日志；其他版本
+仍需分别验证。

@@ -58,10 +58,10 @@ function writeNotes(outPath) {
         '',
         '## 已知情况',
         '',
-        '版本 `' + version + '`。面板与 ExtendScript 宿主层已在真实的 Premiere Pro 25.3.0',
-        '上完成真机验证（环境检测 / getHostInfo / analyze / 导出 EDL 全链路跑通）；',
-        '「落地到 Premiere」（createSubClip → 拼装序列）环节待带真实素材的项目验证，',
-        '遇到问题欢迎开 issue 反馈 `checkCapabilities` 的输出。',
+        '版本 `' + version + '`。项目已获使用者真机验证确认（2026-11-08）。',
+        '已记录的 Premiere 版本为 25.3.0；此前关于落地链路与真实素材联调待验证的说明已更新。',
+        '其他 Premiere 版本、素材格式及参数组合仍需分别验证，',
+        '遇到问题欢迎开 issue，附实际版本、`checkCapabilities` 输出与面板日志。',
         ''
     ].join('\n');
     fs.writeFileSync(outPath, body, 'utf8');
