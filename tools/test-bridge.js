@@ -139,12 +139,17 @@ test('sessionPathFor：稳定且清洗文件名', async () => {
 });
 
 test('defaultEdlPath：与源视频同目录加后缀', async () => {
+    // 用平台分隔符构造路径 —— 测的是「同目录 + 加后缀」这个语义，
+    // 不是特定平台的字符串形式（path.dirname 在 Linux 上不认 \，
+    // 写死 Windows 字符串会让 CI 在 ubuntu 上必败，2026-11-07 踩过）
+    const video = ['D:', 'v', 'rec.mp4'].join(path.sep);
     assert.strictEqual(
-        bridge.defaultEdlPath('D:\\v\\rec.mp4'),
-        path.join('D:\\v', 'rec_autoedit.edl'));
+        bridge.defaultEdlPath(video),
+        path.join(path.dirname(video), 'rec_autoedit.edl'));
+    const noext = ['D:', 'v', 'no_ext'].join(path.sep);
     assert.strictEqual(
-        bridge.defaultEdlPath('D:\\v\\no_ext'),
-        path.join('D:\\v', 'no_ext_autoedit.edl'));
+        bridge.defaultEdlPath(noext),
+        path.join(path.dirname(noext), 'no_ext_autoedit.edl'));
 });
 
 test('writePayload / readJsonFile 往返', async () => {
