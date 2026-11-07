@@ -208,8 +208,9 @@ Premiere 的插件 API —— **ExtendScript 与 UXP 都一样** —— 没有�
 2. 确认 `PlayerDebugMode` 已写入 `HKCU\Software\Adobe\CSXS.10 / .11 / .12`（值字符串 `1`）
 3. **完全退出** Premiere 再启动。注意任务管理器里要确认没有 `Adobe Premiere Pro.exe`
    与 `CEPHtmlEngine` 残留进程，只关窗口不够
-4. 仍不显示时打开日志：在 `HKCU\Software\Adobe\CSXS.12` 下新建字符串值 `LogType`，设为 `0`，
-   重启 PR 后查看 `%APPDATA%\Adobe\CEP\logs\CEPHtmlEngine.log`
+4. 仍不显示时打开日志：在 `HKCU\Software\Adobe\CSXS.12` 下新建字符串值 `LogType`，
+   设为 `all`，重启 PR 后查看 `%APPDATA%\Adobe\CEP\logs\CEPHtmlEngine.log`。
+   （注意值是字符串 `all`，不是数字 —— 设成 `0` 不会生成日志。）
 
 > `install.bat` 会**同时尝试**用户级目录和 Premiere 安装目录。安装目录多在程序目录下、
 > 写入通常需要管理员权限，失败时脚本只告警、不影响用户级安装。
@@ -280,16 +281,20 @@ python pr_cli.py analyze --video "<你的录像.mp4>" --session-out "%TEMP%\s.js
 
 ## 为这个仓库做贡献
 
+动手前请先读 [CONTRIBUTING.md](CONTRIBUTING.md) —— 里面有检查清单、
+代码约束（ES3 / Chromium 74 / BOM）和提交规范。
+
 **没有构建步骤。** CEP 扩展是「源码即产物」—— 改完源码直接重跑安装脚本、重启 Premiere 就能看到效果，
 不存在编译、打包或转译。所以贡献者 clone 下来就能立刻开始改。
 
 ### 提交前请跑一遍检查
 
 ```bash
-node tools/check.js          # 语法 / manifest 一致性 / 编码 / 浏览器兼容
-node tools/check-links.js    # 文档里的相对链接是否有效
-node tools/package.js        # 打包到 dist/（发布时才需要）
-node tools/verify-package.js # 校验打出来的包（须先跑上一条）
+node tools/check.js           # 语法 / manifest 一致性 / 编码 / 浏览器兼容
+node tools/test-bridge.js     # bridge.js 行为测试（真实子进程流）
+node tools/check-links.js     # 文档里的相对链接是否有效
+node tools/package.js         # 打包到 dist/（发布时才需要）
+node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 ```
 
 前两条与 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一份代码，
@@ -303,6 +308,7 @@ node tools/verify-package.js # 校验打出来的包（须先跑上一条）
 | `install.bat` 必须是纯 ASCII | cmd.exe 对批处理源文件的非 ASCII 字节解码不可靠 |
 | manifest 的 `Id` 与 `install.ps1` 的 `$ExtId` 一致 | 不一致会把扩展装进 CEP 不认的目录，菜单里看不到 |
 | `manifest.xml` 标签配平 | 清单解析失败时扩展静默不加载，没有任何提示 |
+| bridge.js 行为测试 | NDJSON 流式解析是纯手写代码，跨 chunk、多字节拆分、取消/超时等 18 项边界已固化成测试 |
 | 文档相对链接有效 | 目录结构一动就容易留下死链 |
 
 ### 编辑器的注意事项
@@ -325,13 +331,17 @@ node tools/verify-package.js # 校验打出来的包（须先跑上一条）
 ```
 .
 ├── .gitattributes               # 固定 Windows 脚本的换行符为 CRLF
-├── .github/workflows/ci.yml     # CI：静态校验 + 文档链接检查
+├── .github/workflows/ci.yml     # CI：静态校验 + 行为测试 + 文档链接检查
+├── CHANGELOG.md                 # 更新日志（Keep a Changelog 格式）
+├── CONTRIBUTING.md              # 贡献指南
 ├── LICENSE                      # MIT（含 Third-party notices 一节）
 ├── README.md
 ├── docs/
-│   └── architecture.md          # 架构、单位约定、协议、错误码
+│   ├── architecture.md          # 架构、单位约定、协议、错误码
+│   └── versioning.md            # 版本号规则与发布流程
 ├── tools/
 │   ├── check.js                 # 静态校验（与 CI 同一份，可本地跑）
+│   ├── test-bridge.js           # bridge.js 行为测试
 │   ├── check-links.js           # 文档相对链接检查
 │   ├── package.js               # 打包成可分发的 zip
 │   └── verify-package.js        # 校验打出来的包结构
