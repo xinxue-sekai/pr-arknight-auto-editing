@@ -24,7 +24,9 @@ permissions:
 jobs:
   release:
     name: 打包并发布
-    runs-on: ubuntu-latest
+    # Windows runner：make-zxp.js 调用的 Adobe ZXPSignCmd 只有 win/mac
+    # 二进制，签名在 Windows 上原生完成；打包本身跨平台（内置 zip 写入器）。
+    runs-on: windows-latest
 
     steps:
       - name: 检出代码

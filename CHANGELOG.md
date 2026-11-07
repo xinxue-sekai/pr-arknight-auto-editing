@@ -10,9 +10,11 @@
 ### Added
 
 - `tools/make-zxp.js`：把打包产物签名为 .zxp（Adobe ZXPSignCmd，按平台
-  下载并缓存、可手动注入路径）；每次签名临时生成自签名证书、用完即删，
-  私钥与密码不进仓库也不进 CI secrets
-- Release workflow 增加 zxp 签名步骤，`.zxp` 作为第二个 Release asset
+  从官方 Adobe-CEP/CEP-Resources 仓库下载并缓存、可手动注入路径）；
+  每次签名临时生成自签名证书、用完即删，私钥与密码不进仓库也不进
+  CI secrets。签名与校验语法已在本机（ZXPSignCmd 4.1.103 win64）端到端验证
+- Release workflow 换用 Windows runner 并增加签名步骤，`.zxp` 作为
+  第二个 Release asset
 - `tools/test-bridge.js`：bridge.js 行为测试，用真实子进程流覆盖 NDJSON 的
   全部边界（末行无换行、单行跨 chunk、UTF-8 多字节被拆开、超大 JSON、
   stderr 噪声、取消/超时/错误码）

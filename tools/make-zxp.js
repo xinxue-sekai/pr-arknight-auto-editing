@@ -69,20 +69,22 @@ if (!fs.existsSync(path.join(STAGE, 'CSXS', 'manifest.xml'))) {
 
 const CACHE_BIN_DIR = path.join(os.homedir(), '.arknight-pr', 'bin');
 
-/** 各平台的候选下载（均为 GitHub raw 直链；URL 变了可用 --zxp-tool 手动指定） */
+/** 各平台的候选下载（官方 Adobe-CEP/CEP-Resources 仓库的版本化直链，
+ *  路径已于 2026-11-07 实地核实：ZXPSignCMD/<版本>/<平台>/ZXPSignCmd.exe；
+ *  URL 变了可用 --zxp-tool 手动指定，或用 git 稀疏克隆该仓库取二进制） */
 function downloadCandidates() {
     const base = 'https://raw.githubusercontent.com/Adobe-CEP/CEP-Resources/master/ZXPSignCMD';
     if (process.platform === 'win32') {
         return [
-            { url: `${base}/ZXPSignCmd-64bit.exe`, file: 'ZXPSignCmd-64bit.exe' },
-            { url: `${base}/ZXPSignCmd.exe`, file: 'ZXPSignCmd.exe' }
+            { url: `${base}/4.1.103/win64/ZXPSignCmd.exe`, file: 'ZXPSignCmd.exe' },
+            { url: `${base}/4.1.103/win32/ZXPSignCmd.exe`, file: 'ZXPSignCmd-win32.exe' }
         ];
     }
     if (process.platform === 'darwin') {
-        return [{ url: `${base}/ZXPSignCmd.dmg`, file: 'ZXPSignCmd.dmg' }];
+        return [{ url: `${base}/4.1.3/macOS/ZXPSignCmd`, file: 'ZXPSignCmd' }];
     }
-    // Linux：Adobe 不提供 ZXPSignCmd 二进制。CI 上签 zxp 需要换成
-    // WINE 跑 Windows 版，或改用其他签名方案 —— 这里明确失败而不是瞎猜。
+    // Linux：Adobe 不提供 ZXPSignCmd 二进制。CI 上的签名用 Windows runner
+    // （release.yml 的 runs-on）；本地 Linux 想签 zxp 需 WINE，明确失败而不是瞎猜。
     return [];
 }
 
@@ -154,14 +156,16 @@ run(['-selfSignedCert', 'CN', 'Local', 'Arknight Auto Editing', EXT_ID, certPass
     '生成自签名证书');
 
 console.log(`签名 → dist/${ZXP_NAME} …`);
-run(['-sign', STAGE, ZXP_PATH, '-cert', certPath, certPass], '签名');
+// 用法是位置参数：-sign <目录> <输出.zxp> <p12> <密码>（不是 -cert 旗标）
+run(['-sign', STAGE, ZXP_PATH, certPath, certPass], '签名');
 
 // 签完立刻删私钥；校验用的是 zxp 内嵌的证书，不需要外部 p12
 try { fs.rmSync(certPath, { force: true }); } catch (e) { }
 try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { }
 
 console.log('校验签名 …');
-run(['-verify', ZXP_PATH, '-certinfo'], '校验 zxp');
+// -skipOnlineRevocationChecks：CI 上不该依赖吊销检查服务器可达
+run(['-verify', ZXP_PATH, '-certInfo', '-skipOnlineRevocationChecks'], '校验 zxp');
 
 if (!fs.existsSync(ZXP_PATH) || fs.statSync(ZXP_PATH).size === 0) {
     console.error('签名后未产出 zxp');
