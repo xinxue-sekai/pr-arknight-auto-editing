@@ -98,9 +98,10 @@ jobs:
 
           ## 已知情况
 
-          版本 \`$VER\`。ExtendScript 落地链路（\`createSubClip\` → 拼装序列）
-          尚未在真实的 Premiere Pro 上完成验证，遇到问题欢迎开 issue 反馈
-          \`checkCapabilities\` 的输出。
+          版本 \`$VER\`。面板与 ExtendScript 宿主层已在真实的 Premiere Pro 25.3.0
+          上完成真机验证（环境检测 / getHostInfo / analyze / 导出 EDL 全链路跑通）；
+          「落地到 Premiere」（createSubClip → 拼装序列）环节待带真实素材的项目验证，
+          遇到问题欢迎开 issue 反馈 \`checkCapabilities\` 的输出。
           EOF
 
           cat release-notes.md

@@ -9,6 +9,12 @@
 
 ### Added
 
+- （无）
+
+## [0.1.1] - 2026-11-07
+
+### Added
+
 - `tools/make-zxp.js`：把打包产物签名为 .zxp（Adobe ZXPSignCmd，按平台
   从官方 Adobe-CEP/CEP-Resources 仓库下载并缓存、可手动注入路径）；
   每次签名临时生成自签名证书、用完即删，私钥与密码不进仓库也不进
@@ -24,6 +30,23 @@
 ### Changed
 
 - bridge.js 导出 `runCli`（此前 `probe` / `analyze` 等封装内部才可用）
+
+### Fixed
+
+- 面板在真实 Premiere 25.3.0 上首跑暴露的三个问题（2026-11-07 真机验证修复）：
+  - `evalScript` 走错宿主 API（`invokeAsync`）导致环境检测 Promise 永久卡死，
+    改为官方实现直接调 `host.evalScript`
+  - 路径常量写成大写 `EXTENSION`，原生层只认小写 `extension`，
+    导致扩展目录解析返回 Invalid Input Params
+  - `install.ps1` 在 PS 5.1 下写出的 `config.json` 带 UTF-8 BOM，
+    面板端 `JSON.parse` 失败被吞、用户配置被静默忽略
+- hostscript.jsx：ExtendScript 引擎是 ES3、没有内置 JSON，所有 JSX 调用
+  必然 ReferenceError（表现为 EvalScript error）。内置零依赖 JSON 兼容层，
+  仅在宿主缺原生 JSON 时安装，语义与原生对拍验证一致
+- CI 在 ubuntu-latest 上 bridge 测试必败（期望值写死 Windows 路径语义，
+  path.dirname 在 Linux 不认 `\`），改为平台无关断言
+- CI 在 ubuntu-latest 上依赖不预装的 `unzip` 导致的失败
+  （改为零依赖的 Node 包校验脚本）
 
 ## [0.1.0] - 2026-09-21
 
