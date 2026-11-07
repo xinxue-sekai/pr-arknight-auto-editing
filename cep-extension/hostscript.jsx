@@ -20,6 +20,158 @@ var Arknight = {};
 Arknight.TICKS_PER_SECOND = 254016000000;
 
 // ------------------------------------------------------------------
+//  JSON 兼容层
+// ------------------------------------------------------------------
+// ExtendScript 是 ES3，**没有内置 JSON 对象**。缺了它，本文件所有
+// 返回值（JSON.stringify）与载荷读取（JSON.parse）都会抛
+// ReferenceError，面板侧表现为「EvalScript error.」——
+// 2026-11-07 在 PR 25.3 真机首次运行时踩到。
+// 只在宿主确实没有 JSON 时安装 polyfill，实现覆盖本文件用到的
+// 全部数据形态（嵌套对象 / 数组 / 字符串 / 数字 / 布尔 / null）。
+
+if (typeof JSON === 'undefined') {
+    JSON = {
+        stringify: function (v) { return _arkJsonStr(v, []); },
+        parse: function (text) { return _arkJsonParse(String(text)); }
+    };
+}
+
+// ES3 的块级函数声明行为不可靠，这里全部声明在顶层；
+// 若宿主自带 JSON（新版本可能带），下面的实现闲置，不会覆盖它。
+
+function _arkJsonQuote(s) {
+    var out = '"', i, c, code, hex;
+    for (i = 0; i < s.length; i++) {
+        c = s.charAt(i);
+        code = s.charCodeAt(i);
+        if (c === '"') { out += '\\"'; }
+        else if (c === '\\') { out += '\\\\'; }
+        else if (code === 8) { out += '\\b'; }
+        else if (code === 9) { out += '\\t'; }
+        else if (code === 10) { out += '\\n'; }
+        else if (code === 12) { out += '\\f'; }
+        else if (code === 13) { out += '\\r'; }
+        else if (code < 32) {
+            hex = code.toString(16);
+            while (hex.length < 4) { hex = '0' + hex; }
+            out += '\\u' + hex;
+        } else { out += c; }
+    }
+    return out + '"';
+}
+
+function _arkJsonStr(v, seen) {
+    var t = typeof v, i, len, parts = [], k;
+    if (v === null || t === 'undefined') { return 'null'; }
+    if (t === 'boolean') { return v ? 'true' : 'false'; }
+    if (t === 'number') { return isFinite(v) ? String(v) : 'null'; }
+    if (t === 'string') { return _arkJsonQuote(v); }
+    if (t !== 'object') { return 'null'; }   // function 等防御
+    for (k = 0; k < seen.length; k++) {
+        if (seen[k] === v) { return 'null'; }  // 环引用防御
+    }
+    seen.push(v);
+    parts = [];
+    if (v instanceof Array) {
+        for (i = 0, len = v.length; i < len; i++) {
+            parts.push(_arkJsonStr(v[i], seen));
+        }
+        seen.pop();
+        return '[' + parts.join(',') + ']';
+    }
+        for (k in v) {
+            // 与原生 JSON.stringify 语义一致：对象成员中的 undefined
+            // 直接省略（数组元素才转 null）
+            if (typeof v[k] === 'function' || typeof v[k] === 'undefined') { continue; }
+            parts.push(_arkJsonQuote(String(k)) + ':' + _arkJsonStr(v[k], seen));
+        }
+    seen.pop();
+    return '{' + parts.join(',') + '}';
+}
+
+function _arkJsonParse(text) {
+    var pos = 0;
+    function ws() {
+        while (pos < text.length && ' \t\r\n'.indexOf(text.charAt(pos)) >= 0) { pos++; }
+    }
+    function value() {
+        ws();
+        var c = text.charAt(pos);
+        if (c === '{') { return obj(); }
+        if (c === '[') { return arr(); }
+        if (c === '"') { return str(); }
+        if (text.substr(pos, 4) === 'true') { pos += 4; return true; }
+        if (text.substr(pos, 5) === 'false') { pos += 5; return false; }
+        if (text.substr(pos, 4) === 'null') { pos += 4; return null; }
+        return num();
+    }
+    function obj() {
+        pos++; ws();
+        var o = {}, k, ch;
+        if (text.charAt(pos) === '}') { pos++; return o; }
+        for (;;) {
+            ws();
+            k = str();
+            ws();
+            if (text.charAt(pos) !== ':') { throw new Error('JSON 语法错误（应为 :）@' + pos); }
+            pos++;
+            o[k] = value();
+            ws();
+            ch = text.charAt(pos);
+            if (ch === ',') { pos++; continue; }
+            if (ch === '}') { pos++; return o; }
+            throw new Error('JSON 语法错误（对象）@' + pos);
+        }
+    }
+    function arr() {
+        pos++; ws();
+        var a = [], ch;
+        if (text.charAt(pos) === ']') { pos++; return a; }
+        for (;;) {
+            a.push(value());
+            ws();
+            ch = text.charAt(pos);
+            if (ch === ',') { pos++; continue; }
+            if (ch === ']') { pos++; return a; }
+            throw new Error('JSON 语法错误（数组）@' + pos);
+        }
+    }
+    function str() {
+        pos++;
+        var out = '', c, e, hex;
+        while (pos < text.length) {
+            c = text.charAt(pos);
+            if (c === '"') { pos++; return out; }
+            if (c === '\\') {
+                pos++;
+                e = text.charAt(pos);
+                if (e === 'n') { out += '\n'; pos++; }
+                else if (e === 't') { out += '\t'; pos++; }
+                else if (e === 'r') { out += '\r'; pos++; }
+                else if (e === 'b') { out += '\b'; pos++; }
+                else if (e === 'f') { out += '\f'; pos++; }
+                else if (e === 'u') {
+                    hex = text.substr(pos + 1, 4);
+                    out += String.fromCharCode(parseInt(hex, 16));
+                    pos += 5;
+                } else { out += e; pos++; }
+            } else { out += c; pos++; }
+        }
+        throw new Error('JSON 字符串未闭合');
+    }
+    function num() {
+        var start = pos;
+        while (pos < text.length && '0123456789+-.eE'.indexOf(text.charAt(pos)) >= 0) { pos++; }
+        if (start === pos) { throw new Error('JSON 语法错误 @' + pos); }
+        return parseFloat(text.substr(start, pos - start));
+    }
+    var v = value();
+    ws();
+    if (pos !== text.length) { throw new Error('JSON 末尾有多余内容 @' + pos); }
+    return v;
+}
+
+// ------------------------------------------------------------------
 //  日志与工具
 // ------------------------------------------------------------------
 

@@ -607,6 +607,14 @@
         } catch (e) {
             ok = false;
             emit('Premiere: 无法通信 —— ' + e.message);
+            // 「EvalScript error.」不带任何细节，用两条探测区分根因：
+            // hostscript 没加载 / 宿主缺 JSON / 其他 JSX 内部错误
+            cs.evalScript('typeof Arknight == "undefined" ? "Arknight:missing" : "Arknight:loaded"', function (r1) {
+                if (r1) { log('env| 探测 hostscript: ' + r1); }
+            });
+            cs.evalScript('typeof JSON == "undefined" ? "JSON:missing" : "JSON:present"', function (r2) {
+                if (r2) { log('env| 探测 JSON: ' + r2); }
+            });
             emit('  请确认本面板是通过 Premiere 的「窗口 → 扩展」打开的，而非在浏览器里直接打开 index.html。');
         }
 
