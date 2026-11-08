@@ -8,6 +8,10 @@
 
 * text=auto
 
+# Backend source hashes are session compatibility inputs: keep identical bytes
+# on Windows and Linux, independent of core.autocrlf.
+*.py text eol=lf
+
 # cmd.exe 需要可靠的 CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

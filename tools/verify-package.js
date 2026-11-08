@@ -287,7 +287,8 @@ if (setup) {
     }
     expectedFiles.set(topDir + '/LICENSE', fs.readFileSync(path.join(ROOT, 'LICENSE')));
     expectedFiles.set(topDir + '/INSTALLATION.md', Buffer.from(fs.readFileSync(path.join(ROOT, 'docs/installation-options.md'), 'utf8')
-        .replace('../cep-extension/install/runtime-lock.json', 'runtime-lock.json')));
+        .replace('../cep-extension/install/runtime-lock.json', 'runtime-lock.json')
+        .replace('releases/v' + version + '.md', 'https://github.com/xinxue-sekai/pr-arknight-auto-editing/releases/tag/v' + version)));
 }
 let byteMatches = 0;
 for (const [name, source] of expectedFiles) {

@@ -10,7 +10,7 @@
 - **Node.js 20+**（跑检查与测试；扩展本身不依赖你的 Node，CEP 自带运行时）
 - **Python 3.10+ 与 `numpy`/`opencv-python`**（只有调分析链路时才需要）
 - Windows 为主开发目标（安装脚本、CEP 注册表都是 Windows 语境），
-  但工具链脚本在 Linux/macOS 上同样可跑（CI 覆盖 Ubuntu 与 Windows）
+  但工具链脚本在 Linux/macOS 上同样可跑（CI 使用 Ubuntu 24.04 与 Windows；固定 Ubuntu 版本以匹配 Python 3.13.2 的可用构建）
 
 **没有构建步骤。** CEP 扩展是「源码即产物」——改完源码重跑安装脚本、
 重启 Premiere 就能看到效果。

@@ -24,6 +24,6 @@ for (const name of required) {
 }
 for (const name of ['setup.bat', 'setup.ps1', 'runtime-lock.json']) fs.copyFileSync(path.join(root, 'cep-extension/install', name), path.join(stage, name));
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(stage, 'LICENSE'));
-fs.writeFileSync(path.join(stage, 'INSTALLATION.md'), fs.readFileSync(path.join(root, 'docs/installation-options.md'), 'utf8').replace('../cep-extension/install/runtime-lock.json', 'runtime-lock.json'));
+fs.writeFileSync(path.join(stage, 'INSTALLATION.md'), fs.readFileSync(path.join(root, 'docs/installation-options.md'), 'utf8').replace('../cep-extension/install/runtime-lock.json', 'runtime-lock.json').replace('releases/v' + version + '.md', 'https://github.com/xinxue-sekai/pr-arknight-auto-editing/releases/tag/v' + version));
 writeZip(stage, path.join(dist, `arknight-pr-setup-v${version}-windows-x64.zip`));
 console.log('Unified online setup ZIP built (runtime downloaded and hash-verified at install time).');

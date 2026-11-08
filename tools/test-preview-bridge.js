@@ -15,8 +15,14 @@ bridge.init(path.resolve(__dirname, '../cep-extension'));
 const video = path.join(tmp, '短片 帧号测试.avi');
 const instances = [];
 let spawned = 0;
+const workerSpawns = [];
+const backend = path.resolve(__dirname, '../backend');
 const spawn = cp.spawn;
-cp.spawn = function () { spawned++; return spawn.apply(this, arguments); };
+cp.spawn = function (exe, args) {
+    spawned++;
+    if (args.includes(path.join(backend, 'preview_server.py'))) workerSpawns.push({ exe, args });
+    return spawn.apply(this, arguments);
+};
 const delay = ms => new Promise(r => setTimeout(r, ms));
 async function until(fn) {
     const end = Date.now() + 15000;
@@ -39,8 +45,15 @@ async function seek(client, frame) {
     return result;
 }
 (async () => {
+    const exact = cp.execFileSync(process.env.PYTHON || 'python',
+        ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
+    assert.ok(path.isAbsolute(exact), 'Python must resolve to an absolute executable');
+    assert.ok(bridge.paths.CONFIG_PATH.startsWith(tmp + path.sep), 'config must use isolated HOME');
+    assert.strictEqual(bridge.saveConfig({ pythonPath: exact, cliDir: backend }), true);
     const py = await bridge.detectPython();
-    assert.ok(py.exe, 'Python 3.10+ required');
+    assert.strictEqual(py.exe, exact, 'bridge must use the dependency interpreter, not a launcher default');
+    assert.deepStrictEqual(py.preArgs, []);
+    assert.strictEqual(bridge.getRuntimeConfig().cliDir, backend);
     const made = cp.spawnSync(py.exe, py.preArgs.concat(['-I', '-c',
         'import cv2,numpy as np,sys\nw=cv2.VideoWriter(sys.argv[1],cv2.VideoWriter_fourcc(*"MJPG"),10,(96,64))\nassert w.isOpened()\nfor i in range(12): w.write(np.full((64,96,3),i*20,dtype=np.uint8))\nw.release()', video]), { encoding: 'utf8' });
     assert.strictEqual(made.status, 0, made.stderr);
@@ -92,6 +105,11 @@ async function seek(client, frame) {
     assert.strictEqual(largeFrames[0].sourceWidth, 1920);
     assert.strictEqual(largeFrames[0].sourceHeight, 1080);
     await large.close();
+    assert.strictEqual(workerSpawns.length, 2, 'both videos must launch the repository preview worker');
+    for (const worker of workerSpawns) {
+        assert.strictEqual(worker.exe, exact, 'preview worker must use the dependency interpreter');
+        assert.deepStrictEqual(worker.args.slice(0, 2), ['-u', path.join(backend, 'preview_server.py')]);
+    }
     bridge.saveConfig({ pythonPath: path.join(tmp, 'missing-python') });
     assert.strictEqual((await bridge.detectPython()).exe, null, 'explicit invalid Python must not fall back');
     console.log('PASS: exact pixels/frame numbers, A-B-A latest, shared worker, channel isolation, bounds/EOF, close/replacement cleanup, explicit Python failure');
