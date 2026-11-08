@@ -423,6 +423,6 @@ PR 的插件 API 没有修改片段速度的接口）。
 | 无法自动设置片段速度 | ExtendScript 与 UXP 都没有该 API，QE DOM 也没有 | 只能等 Adobe 补 API；目前靠橙色标记提示手动设置 |
 | 当前已记录的真机版本为 25.3.0 | 使用者已于 2026-11-08 确认真机验证；尚未记录其他版本的完整结果 | 欢迎反馈其他版本的 `checkCapabilities` 输出 |
 | `clipsInSequence` 可能读到 `-1` | `TrackItemCollection` 在不同版本上暴露 `numItems` 或 `length`，都没有时读不到 | 已做兼容，读不到时面板改用 `subclipsCreated` 显示 |
-| 素材与参数覆盖范围有限 | 单素材性能与诊断帧不构成独立准确率验收，0.2x 存在过场假阳性 | 见[测量记录](validation-2026-11-08.md) |
-| 新版宿主仅部分验证 | 源点语义、音频精度与 overwrite 兜底未完成真机验收，返回 partial | 见[全面自检](self-check-2026-11-08.md) |
+| 素材与参数覆盖范围有限 | 单素材性能与诊断帧不构成独立准确率验收，0.2x 存在过场假阳性 | 见[验证状态](verification-status.md) |
+| 新版宿主仅部分验证 | 源点语义、音频精度与 overwrite 兜底未完成真机验收，返回 partial | 见[验证状态](verification-status.md) |
 | 浏览器剪后预览是跳切试听 | 不承诺帧精确剪接或长期音画同步；不兼容编码代理需可选 FFmpeg | 最终在 Premiere 检查 |

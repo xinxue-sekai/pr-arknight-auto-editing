@@ -85,6 +85,6 @@ node tools/test-all.js        # CI/Release 全测试入口，自动发现 tools/
 - 面板日志区的内容（必要时含 stderr 尾部）
 
 Premiere 真机验证已记录部分功能，当前测试版本为 25.3.0；具体范围见
-[全面自检](docs/self-check-2026-11-08.md)。模拟 API 测试不能替代完整真机验收。涉及落地行为或版本兼容性的改动，请记录实际测试的
+[验证状态与已知限制](docs/verification-status.md)。模拟 API 测试不能替代完整真机验收。涉及落地行为或版本兼容性的改动，请记录实际测试的
 Premiere 版本、素材条件、`checkCapabilities` 输出与面板日志；其他版本
 仍需分别验证。
