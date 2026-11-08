@@ -64,13 +64,18 @@ function Config-AbsolutePath($value) {
 function Hash($file) { return (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Tree($dir) {
     $map = @{}
-    if (Test-Path -LiteralPath $dir) {
-        foreach ($f in Get-ChildItem -LiteralPath $dir -File -Recurse) {
-            $rel = $f.FullName.Substring($dir.Length + 1)
-            if ($rel -match '(^|\\)(__pycache__)(\\|$)' -or $rel -match '\.pyc$') { continue }
-            $map[$rel] = Hash $f.FullName
+    # Enumeration may expand 8.3 ancestors; build keys from names, not absolute offsets.
+    function Walk-Tree($current, $relative) {
+        foreach ($entry in Get-ChildItem -LiteralPath $current) {
+            $rel = if ($relative) { Join-Path $relative $entry.Name } else { $entry.Name }
+            if ($entry.PSIsContainer) {
+                if ($entry.Name -ne '__pycache__') { Walk-Tree $entry.FullName $rel }
+            } elseif ($entry.Name -notmatch '.pyc$') {
+                $map[$rel] = Hash $entry.FullName
+            }
         }
     }
+    if (Test-Path -LiteralPath $dir) { Walk-Tree $dir '' }
     return $map
 }
 function Same($a, $b) {

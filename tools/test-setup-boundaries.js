@@ -33,6 +33,36 @@ try {
         const result = run(`$e=$null;$t=$null;[void][Management.Automation.Language.Parser]::ParseFile(${quote(path.join(install, name))},[ref]$t,[ref]$e);if($e.Count){$e;exit 1}`);
         assert.equal(result.status, 0, result.stdout + result.stderr);
     }
+    // Load only inventory functions: exercise real PS5.1 paths without installation.
+    const treeRoot = path.join(temp, 'Long inventory root 中文 [files]');
+    const inventory = {
+        'pyexpat.pyd': 'root binary',
+        'Lib/site-packages/中文 [模块]/module.py': 'nested source',
+        'Lib/site-packages/keep.txt': 'nested data',
+        '中文.txt': 'unicode data'
+    };
+    for (const [name, content] of Object.entries({ ...inventory, '__pycache__/ignored.bin': 'ignored', 'Lib/__pycache__/nested.pyc': 'ignored', 'Lib/ignored.pyc': 'ignored' })) {
+        const file = path.join(treeRoot, name);
+        fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content);
+    }
+    const trees = run(`$ErrorActionPreference='Stop';Set-StrictMode -Version 2;[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);
+$e=$null;$t=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(path.join(install, 'setup.ps1'))},[ref]$t,[ref]$e);
+foreach($name in @('Hash','Tree','Same')){$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $fn.Extent.Text}
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class BoundaryShortPath { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetShortPathName(string path, StringBuilder result, uint size); }';
+$long=${quote(treeRoot)};$buffer=New-Object Text.StringBuilder 32768;$size=[BoundaryShortPath]::GetShortPathName($long,$buffer,$buffer.Capacity);
+if($size -eq 0 -or $size -ge $buffer.Capacity){throw 'GetShortPathName failed'};$short=$buffer.ToString();
+if($short -eq $long -or $short -notmatch '~'){throw 'Actual 8.3 alias unavailable; regression requires short names enabled'};
+if(-not (Test-Path -LiteralPath $short -PathType Container)){throw '8.3 alias does not exist'};
+$a=Tree $long;$b=Tree $short;$c=Tree ($short+'\\');
+if(-not (Same $a $b) -or -not (Same $a $c)){throw 'Long/short/trailing separator inventories differ'};
+foreach($root in @($long,$short)){foreach($key in $a.Keys){if((Hash (Join-Path $root $key)) -ne $a[$key]){throw 'Inventory key cannot resolve source file'}}};
+if((Tree (Join-Path $long 'missing')).Count -ne 0){throw 'Missing tree must be empty'};
+@{long=$long;short=$short;enumerated=(Get-ChildItem -LiteralPath $short -File | Select-Object -First 1).FullName;files=$b}|ConvertTo-Json -Depth 5`);
+    assert.equal(trees.status, 0, trees.stdout + trees.stderr);
+    const treeResult = JSON.parse(trees.stdout);
+    const expectedInventory = Object.fromEntries(Object.entries(inventory).map(([name, content]) => [name.replace(/\//g, '\\'), require('crypto').createHash('sha256').update(content).digest('hex')]));
+    assert.deepEqual(treeResult.files, expectedInventory);
+    console.log(`PASS: real 8.3 inventory: ${treeResult.short} -> ${treeResult.enumerated}; Chinese paths, hashes, ignored caches, trailing separator.`);
     const cfg = path.join(temp, '.arknight-pr/config.json');
     fs.mkdirSync(path.dirname(cfg));
     for (const text of ['{broken', 'null', '[{}]', '42']) {
