@@ -56,7 +56,7 @@ powershellEnv.PSModulePath = [
     const panel = path.join(sandbox, 'roaming/Adobe/CEP/extensions/com.arknight.autoediting');
     fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
     // Exact configuration reported by the user; never access this external directory.
-    const reportedConfig = { pythonPath: null, cliDir: 'D:\\Code\\arknight\\pr\\arknight-auto-editing-main' };
+    const reportedConfig = { pythonPath: null, cliDir: 'C:\\external\\arknight-auto-editing-main' };
     fs.writeFileSync(cfgPath, JSON.stringify(reportedConfig));
     fs.mkdirSync(panel, { recursive: true }); fs.writeFileSync(path.join(panel, 'old.txt'), 'old-panel');
     let noNetwork = true;
