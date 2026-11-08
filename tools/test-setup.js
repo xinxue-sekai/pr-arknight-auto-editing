@@ -19,6 +19,13 @@ for (const item of [lock.python, ...lock.wheels]) {
     assert(['www.python.org', 'files.pythonhosted.org'].includes(new URL(item.url).hostname));
 }
 if (process.platform !== 'win32') { console.log('Runtime lock valid; Windows integration test skipped on this OS.'); process.exit(0); }
+// PS7 parents export a PSModulePath that can hide PS5.1's built-in modules.
+// Use only Windows PowerShell system modules, never inherited/user modules.
+const powershellEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+powershellEnv.PSModulePath = [
+    path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/Modules'),
+    path.join(process.env.ProgramFiles, 'WindowsPowerShell/Modules')
+].join(path.delimiter);
 (async () => {
     // Do not package into shared dist: parallel test/release jobs must not collide.
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-setup-test-'));
@@ -57,7 +64,7 @@ if (process.platform !== 'win32') { console.log('Runtime lock valid; Windows int
         const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', setupScript, '-SandboxRoot', sandbox, '-DownloadCache', cache];
         if (failure) args.push('-TestFailure', failure);
         if (noNetwork) args.push('-TestNoNetwork');
-        const result = spawnSync('powershell.exe', args, { cwd: root, encoding: 'utf8', timeout: 240000 });
+        const result = spawnSync('powershell.exe', args, { cwd: root, env: powershellEnv, encoding: 'utf8', timeout: 240000 });
         if ((result.status === 0) !== expectSuccess) throw new Error(result.stdout + '\n' + result.stderr);
         if (failure && !/Injected failure/.test(result.stdout + result.stderr)) throw new Error('Did not reach rollback point:\n' + result.stdout + result.stderr);
         if (expectSuccess) {
@@ -69,7 +76,7 @@ if (process.platform !== 'win32') { console.log('Runtime lock valid; Windows int
         return result.stdout + result.stderr;
     };
     const original = fs.readFileSync(cfgPath);
-    const psVersion = spawnSync('powershell.exe', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' });
+    const psVersion = spawnSync('powershell.exe', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { env: powershellEnv, encoding: 'utf8' });
     assert.equal(psVersion.status, 0);
     assert.match(psVersion.stdout, /^5\.1\./);
     console.log('PowerShell ' + psVersion.stdout.trim());
@@ -111,7 +118,7 @@ if (process.platform !== 'win32') { console.log('Runtime lock valid; Windows int
     fs.renameSync(cache + '-matrix', cache);
     fs.writeFileSync(cfgPath, original);
     const lockFile = path.join(sandbox, 'local/ArknightPR/setup.lock');
-    const holder = require('child_process').spawn('powershell.exe', ['-NoProfile', '-Command', `$f=[IO.File]::Open('${lockFile.replace(/'/g, "''")}','OpenOrCreate','ReadWrite','None'); Write-Output 'LOCKED'; [Console]::ReadLine() | Out-Null; $f.Dispose()`]);
+    const holder = require('child_process').spawn('powershell.exe', ['-NoProfile', '-Command', `$f=[IO.File]::Open('${lockFile.replace(/'/g, "''")}','OpenOrCreate','ReadWrite','None'); Write-Output 'LOCKED'; [Console]::ReadLine() | Out-Null; $f.Dispose()`], { env: powershellEnv });
     try {
         await new Promise((resolve, reject) => {
             holder.stdout.once('data', resolve); holder.once('error', reject);
@@ -240,7 +247,7 @@ if (process.platform !== 'win32') { console.log('Runtime lock valid; Windows int
             changed.wheels[0].url = `http://127.0.0.1:${server.address().port}/${mode}`;
             fs.writeFileSync(lockPath, JSON.stringify(changed));
             const output = await new Promise((resolve, reject) => {
-                const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', setupScript, '-SandboxRoot', sandbox], { cwd: root });
+                const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', setupScript, '-SandboxRoot', sandbox], { cwd: root, env: powershellEnv });
                 let text = '';
                 child.stdout.on('data', b => { text += b.toString('utf8'); });
                 child.stderr.on('data', b => { text += b.toString('utf8'); });

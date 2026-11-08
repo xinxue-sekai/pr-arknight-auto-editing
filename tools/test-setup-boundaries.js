@@ -6,11 +6,24 @@ const os = require('os');
 const assert = require('assert');
 const { spawnSync } = require('child_process');
 if (process.platform !== 'win32') { console.log('SKIP: Windows PowerShell boundaries'); process.exit(0); }
+// PS7 parents export a PSModulePath that can hide PS5.1's built-in modules.
+// Use only Windows PowerShell system modules, never inherited/user modules.
+const powershellEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+powershellEnv.PSModulePath = [
+    path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/Modules'),
+    path.join(process.env.ProgramFiles, 'WindowsPowerShell/Modules')
+].join(path.delimiter);
 const install = path.resolve(__dirname, '../cep-extension/install');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-install-boundaries-'));
 const quote = value => "'" + value.replace(/'/g, "''") + "'";
-const run = code => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', code], { encoding: 'utf8', timeout: 30000 });
+const run = code => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', code], { env: powershellEnv, encoding: 'utf8', timeout: 30000 });
 try {
+    // Resolve and execute the real PS5.1 cmdlet even under a polluted parent env.
+    const hashFile = path.join(temp, 'hash-probe.txt');
+    fs.writeFileSync(hashFile, 'PS5.1 module discovery');
+    const hash = run(`$ErrorActionPreference='Stop';if($PSVersionTable.PSVersion -notlike '5.1.*'){throw 'Expected PS5.1'};(Get-FileHash -LiteralPath ${quote(hashFile)} -Algorithm SHA256).Hash`);
+    assert.equal(hash.status, 0, hash.stdout + hash.stderr);
+    assert.equal(hash.stdout.trim().toLowerCase(), require('crypto').createHash('sha256').update(fs.readFileSync(hashFile)).digest('hex'));
     for (const name of ['install.ps1', 'setup.ps1']) {
         const bytes = fs.readFileSync(path.join(install, name));
         assert(bytes.subarray(0, 3).equals(Buffer.from([239, 187, 191])));
