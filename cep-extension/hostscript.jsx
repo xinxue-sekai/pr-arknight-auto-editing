@@ -229,7 +229,7 @@ Arknight._findByPath = function (bin, mediaPath, depth) {
         var t = '';
         try { t = String(item.type); } catch (e2) { t = ''; }
 
-        if (t === 'BIN' || t === 'ROOT') {
+        if (t === 'BIN' || t === 'ROOT' || t === '2' || t === '3') {
             var hit = Arknight._findByPath(item, mediaPath, depth + 1);
             if (hit) { return hit; }
             continue;
@@ -252,6 +252,27 @@ Arknight._samePath = function (a, b) {
     try { na = decodeURIComponent(na); } catch (e) { }
     try { nb = decodeURIComponent(nb); } catch (e2) { }
     return na === nb;
+};
+
+/** 仅保存已有路径的工程；不调用 saveAs，不为未命名工程选择路径。 */
+Arknight.saveProject = function () {
+    var path = '';
+    try {
+        var proj = app.project;
+        if (!proj) { throw new Error('没有打开的项目'); }
+        path = String(proj.path || '');
+        if (!path || !/\.prproj$/i.test(path)) {
+            throw new Error('工程尚无有效保存路径，请先在 Premiere 中手动另存为');
+        }
+        if (typeof proj.save !== 'function') { throw new Error('当前宿主不支持 project.save'); }
+        var result = proj.save();
+        // 文档返回码 0；Premiere 25.3 真机亦返回 true。未知值仍不能宣称成功。
+        if (result !== 0 && result !== true) { throw new Error('project.save 未确认保存成功，返回值: ' + String(result)); }
+        return JSON.stringify({ ok: true, saved: true, path: path, returnCode: result, saveResult: result });
+    } catch (e) {
+        return JSON.stringify({ ok: false, saved: false, stage: 'saveProject', path: path,
+            saveResult: result === undefined ? null : result, error: e && e.message ? e.message : String(e) });
+    }
 };
 
 Arknight.findProjectItem = function (mediaPath) {
@@ -377,7 +398,7 @@ Arknight._firstMediaItem = function (bin, depth) {
         if (!item) { continue; }
         var t = '';
         try { t = String(item.type); } catch (e2) { t = ''; }
-        if (t === 'BIN' || t === 'ROOT') {
+        if (t === 'BIN' || t === 'ROOT' || t === '2' || t === '3') {
             var hit = Arknight._firstMediaItem(item, depth + 1);
             if (hit) { return hit; }
             continue;
@@ -435,9 +456,12 @@ Arknight.applyEdit = function (payloadPath) {
             if (!srcItem) { throw new Error('导入后仍无法定位素材: ' + payload.mediaPath); }
         }
 
-        var fps = Number(payload.fps) || 30;
+        var fps = Number(payload.fps);
         var ticksPerFrame = Arknight.TICKS_PER_SECOND / fps;
         var offset = Number(payload.sourceOffsetTicks || 0);
+        if (!isFinite(fps) || fps <= 0 || !isFinite(offset)) {
+            throw new Error('无效 fps 或 sourceOffsetTicks');
+        }
 
         // ---- 1) 准备存放子剪辑的 bin ----
         var targetBin = Arknight._ensureBin(proj, payload.binName || 'ArknightAutoEditing');
@@ -452,7 +476,10 @@ Arknight.applyEdit = function (payloadPath) {
             var s = Number(ranges[i][0]);
             var e = Number(ranges[i][1]);          // 右开
             var len = e - s;
-            if (len <= 0) { continue; }
+            if (!isFinite(s) || !isFinite(e) || s < 0 || Math.floor(s) !== s || Math.floor(e) !== e || len <= 0) {
+                failed.push({ index: i, start: s, end: e });
+                continue;
+            }
 
             var stTicks = Arknight._ticks(s * ticksPerFrame + offset);
             // createSubClip 的 endTime 是「排他」还是「包含」在不同版本上有差异，
@@ -482,7 +509,25 @@ Arknight.applyEdit = function (payloadPath) {
 
         if (subclips.length === 0) {
             throw new Error('所有子剪辑创建均失败（' + failed.length + ' 个）。' +
-                            '当前 Premiere 版本可能不支持 createSubClip，请改用 EDL 导出。');
+                            '请检查当前 Premiere 的 createSubClip 支持情况与宿主日志。');
+        }
+
+        // record_start/end 基于全部 ranges；缺任一段都不能沿用这些标记。
+        // 在两条建序列路径之前停止。保留已建子剪辑，不删除 bin 或源媒体。
+        if (failed.length > 0 || subclips.length !== ranges.length) {
+            var incompleteError = '保留区间不完整：' + failed.length +
+                ' 个区间未创建子剪辑，已停止拼装，未创建序列或标记。' +
+                '已创建的 ' + subclips.length + ' 个子剪辑保留在项目中。';
+            Arknight.log(incompleteError);
+            return JSON.stringify({
+                ok: false,
+                stage: 'applyEdit',
+                error: incompleteError,
+                subclipsCreated: subclips.length,
+                clipsFailed: failed.length,
+                failedDetail: failed.slice(0, 20),
+                markersAdded: 0
+            });
         }
 
         // ---- 3) 用子剪辑顺序拼装新序列 ----
@@ -500,12 +545,14 @@ Arknight.applyEdit = function (payloadPath) {
         if (!seq) {
             throw new Error('无法创建目标序列（createNewSequenceFromClips 与 ' +
                             'createNewSequence 均失败）。' +
-                            '请改用「导出 EDL」→「导入 EDL」路径。');
+                            '请检查序列预设与宿主日志。');
         }
 
+        // 时间轴结构必须通过；源坐标语义未真机确认，单独报告为未验证。
+        var verification = Arknight._verifyEdit(seq, ranges, fps, offset, subclips, srcItem, payload.mediaPath);
         // ---- 4) 写变速标记 ----
         var markersAdded = 0;
-        if (payload.addMarkers !== false && payload.markers && payload.markers.length) {
+        if (verification.ok && payload.addMarkers !== false && payload.markers && payload.markers.length) {
             markersAdded = Arknight._addMarkers(seq, payload.markers, fps);
         }
 
@@ -521,11 +568,15 @@ Arknight.applyEdit = function (payloadPath) {
         // 只报「尝试数」会掩盖 createNewSequenceFromClips 半途失败的情况。
         var inSeq = Arknight._countClips(seq);
 
-        Arknight.log('落地完成：子剪辑 ' + subclips.length + ' 个，序列内 ' +
+        Arknight.log((verification.ok ? '落地结构回读通过（源帧精度未验证）：子剪辑 ' : '落地回读失败（序列已保留）：子剪辑 ') + subclips.length + ' 个，序列内 ' +
                      inSeq + ' 段，标记 ' + markersAdded + ' 个');
 
         return JSON.stringify({
-            ok: true,
+            ok: verification.ok,
+            stage: verification.ok ? 'complete' : 'verification',
+            error: verification.ok ? '' : '序列回读未通过：请检查 verification，已保留序列，未写入标记',
+            verification: verification,
+            warnings: verification.warnings,
             sequenceName: String(seq.name || seqName),
             sequenceID: String(seq.sequenceID || ''),
             subclipsCreated: subclips.length,
@@ -542,6 +593,149 @@ Arknight.applyEdit = function (payloadPath) {
     }
 };
 
+/** 回读 Time.ticks；缺字段不能按 0 处理。 */
+Arknight._readTicks = function (time) {
+    if (!time || time.ticks === undefined || time.ticks === null || time.ticks === '') { return null; }
+    var n = Number(time.ticks);
+    return isFinite(n) ? n : null;
+};
+
+/** 读取已配置的音频剪辑数；0 表示不预期输出音频，不宣称文件物理上无音轨。 */
+Arknight._audioExpectation = function (item) {
+    try {
+        var mapping = item.getAudioChannelMapping();
+        var n = mapping ? mapping.audioClipsNumber : null;
+        if (n !== null && n !== undefined && n !== '' && isFinite(Number(n)) && Number(n) >= 0) {
+            return Number(n) > 0;
+        }
+    } catch (e) { }
+    return null;
+};
+
+/**
+ * timeline-structure-v1：必需验证媒体路径、顺序、fps、时长与连续性。
+ * TrackItem 文档仅称 in/out 相对 source，未说明 subclip 的 source 原点。
+ * source-coordinates-unverified：只记录两种具名候选，不据数值匹配自动选模式。
+ * 真机确认之前绝不声称源入出点或完整帧精度已验证。
+ */
+Arknight._verifyEdit = function (seq, ranges, fps, offset, subclips, srcItem, mediaPath) {
+    var expectedAudio = Arknight._audioExpectation(srcItem);
+    var audioEvidence = expectedAudio === null ? 'unknown' : 'source-channel-mapping';
+    if (expectedAudio === null) {
+        var allSilent = true;
+        for (var sc = 0; sc < subclips.length; sc++) {
+            var hasAudio = Arknight._audioExpectation(subclips[sc]);
+            if (hasAudio === true) { expectedAudio = true; break; }
+            if (hasAudio !== false) { allSilent = false; }
+        }
+        if (expectedAudio === null && allSilent) { expectedAudio = false; }
+        if (expectedAudio !== null) { audioEvidence = 'subclip-channel-mapping'; }
+    }
+    var v = { ok: false, status: 'failed', mode: 'timeline-structure-v1',
+        sourcePointMode: 'source-coordinates-unverified', sourcePointsVerified: false,
+        frameAccurate: false, expectedAudio: expectedAudio, audioEvidence: audioEvidence,
+        expectedFps: fps, actualFps: Arknight._seqFps(seq),
+        videoClipCount: 0, audioClipCount: 0, tracks: [], failures: [],
+        warnings: ['源入出点坐标原点尚未真机确认；完整源帧精度未验证'] };
+    if (expectedAudio === null) { v.warnings.push('音频输出预期未知，未确认音频完整性'); }
+    var tpf = Arknight.TICKS_PER_SECOND / fps;
+    // 仅容忍 tick 取整误差，绝不容忍一帧误差。
+    var tolerance = 2;
+    if (!v.actualFps || Math.abs(v.actualFps - fps) > fps * 0.000001) {
+        v.failures.push('序列 fps 与请求不一致或不可读');
+    }
+    var kinds = ['video', 'audio'];
+    var total = 0;
+    var i, j, k;
+    for (i = 0; i < ranges.length; i++) { total += (ranges[i][1] - ranges[i][0]) * tpf; }
+    v.expectedEndTicks = Arknight._ticks(total);
+    try {
+        var end = seq.end;
+        v.actualEndTicks = end && end.ticks !== undefined ? String(end.ticks) : String(end);
+        if (!isFinite(Number(v.actualEndTicks)) || Math.abs(Number(v.actualEndTicks) - total) > tolerance) {
+            v.failures.push('序列总时长不一致或不可读');
+        }
+    } catch (endError) { v.failures.push('序列总时长不可读'); }
+    for (k = 0; k < kinds.length; k++) {
+        var kind = kinds[k];
+        var count = 0;
+        try {
+            var tracks = k === 0 ? seq.videoTracks : seq.audioTracks;
+            var trackCount = Number(tracks.numTracks);
+            if (!isFinite(trackCount) || trackCount < 0) { throw new Error('轨道数量不可读'); }
+            for (i = 0; i < trackCount; i++) {
+                var clips = tracks[i].clips;
+                var n = clips.numItems;
+                if (n === undefined || n === null) { n = clips.length; }
+                n = Number(n);
+                if (!isFinite(n) || n < 0) { throw new Error('片段数量不可读'); }
+                count += n;
+                var report = { kind: kind, trackIndex: i, clipCount: n, clips: [] };
+                v.tracks.push(report);
+                if (n === 0) { continue; }
+                if (n !== ranges.length) { v.failures.push(kind + ' 轨道 ' + i + ' 片段数量不一致'); }
+                var cursor = 0;
+                for (j = 0; j < n; j++) {
+                    var clip = clips[j];
+                    var actual = { index: j, inTicks: Arknight._readTicks(clip.inPoint),
+                        outTicks: Arknight._readTicks(clip.outPoint), durationTicks: Arknight._readTicks(clip.duration),
+                        startTicks: Arknight._readTicks(clip.start), endTicks: Arknight._readTicks(clip.end) };
+                    report.clips.push(actual);
+                    if (j >= ranges.length) { continue; }
+                    var duration = (ranges[j][1] - ranges[j][0]) * tpf;
+                    actual.expected = { inTicks: Math.round(ranges[j][0] * tpf + offset),
+                        outTicks: Math.round(ranges[j][1] * tpf + offset), durationTicks: Math.round(duration),
+                        startTicks: Math.round(cursor), endTicks: Math.round(cursor + duration) };
+                    actual.sourcePointCandidates = {
+                        'original-media': { inTicks: actual.expected.inTicks, outTicks: actual.expected.outTicks },
+                        'subclip-relative': { inTicks: 0, outTicks: Math.round(duration) }
+                    };
+                    actual.sourcePointStatus = 'unverified';
+                    if (actual.inTicks === null || actual.outTicks === null ||
+                        Math.abs(actual.inTicks - actual.expected.inTicks) > tolerance ||
+                        Math.abs(actual.outTicks - actual.expected.outTicks) > tolerance) {
+                        v.warnings.push(kind + ' 第 ' + j + ' 段源点不可读或不匹配 original-media 候选；未验证');
+                    }
+                    var actualPath = '';
+                    try { actualPath = String(clip.projectItem.getMediaPath() || ''); } catch (pathError) { }
+                    actual.mediaPath = actualPath;
+                    if (!actualPath || !Arknight._samePath(actualPath, mediaPath)) {
+                        v.failures.push(kind + ' 第 ' + j + ' 段媒体路径不匹配或不可读');
+                    }
+                    var fields = ['durationTicks', 'startTicks', 'endTicks'];
+                    for (var f = 0; f < fields.length; f++) {
+                        var field = fields[f];
+                        if (actual[field] === null || Math.abs(actual[field] - actual.expected[field]) > tolerance) {
+                            v.failures.push(kind + ' 轨道 ' + i + ' 第 ' + j + ' 段 ' + field + ' 不一致或不可读');
+                        }
+                    }
+                    // nodeId 可用时再核对身份；时间点核对始终执行。
+                    var expectedId = subclips[j].nodeId;
+                    var actualId = clip.projectItem ? clip.projectItem.nodeId : null;
+                    if (expectedId !== undefined && expectedId !== null &&
+                        (actualId === undefined || actualId === null || String(actualId) !== String(expectedId))) {
+                        v.failures.push(kind + ' 轨道 ' + i + ' 第 ' + j + ' 段源剪辑顺序不一致');
+                    }
+                    cursor += duration;
+                }
+            }
+        } catch (readError) {
+            if (k === 1 && expectedAudio !== true) { v.warnings.push(kind + ' 回读未确认: ' + String(readError)); }
+            else { v.failures.push(kind + ' 回读失败: ' + String(readError)); }
+        }
+        if (k === 0) { v.videoClipCount = count; } else { v.audioClipCount = count; }
+        if (count === 0 && (k === 0 || expectedAudio === true)) {
+            v.failures.push(kind + ' 未读到预期片段');
+        }
+        if (k === 1 && count > 0 && expectedAudio === false) {
+            v.warnings.push('音频映射不预期输出但序列包含音频，请检查映射');
+        }
+    }
+    v.ok = v.failures.length === 0;
+    v.status = v.ok ? 'partial' : 'failed';
+    return v;
+};
+
 /** 找或建一个具名 bin，用于收纳子剪辑，避免污染项目面板根目录。 */
 Arknight._ensureBin = function (proj, name) {
     try {
@@ -550,7 +744,7 @@ Arknight._ensureBin = function (proj, name) {
         for (var i = 0; i < n; i++) {
             var it = root.children[i];
             try {
-                if (String(it.type) === 'BIN' && String(it.name) === name) { return it; }
+                if ((String(it.type) === 'BIN' || String(it.type) === '2') && String(it.name) === name) { return it; }
             } catch (e) { }
         }
         return root.createBin(name);
@@ -745,8 +939,8 @@ Arknight.exportSequenceFcpxml = function (outPath) {
 
 /**
  * 导入 EDL。Premiere 导入 CMX3600 时会直接生成一条序列，
- * 因此这是「插件落地失败时」的通用兜底路径：
- * 面板导出 EDL → 调用本函数 → 得到剪辑好的序列。
+ * 仅报告导入请求结果，不保证素材重链、帧率或帧边界正确。
+ * 特别是 60/59.94 fps 尚未验证，不能作为可靠落地路径。
  */
 Arknight.importEdl = function (edlPath) {
     try {
@@ -770,7 +964,10 @@ Arknight.importEdl = function (edlPath) {
         return JSON.stringify({
             ok: true,
             path: String(edlPath),
-            newSequenceIds: created
+            newSequenceIds: created,
+            reliable: false,
+            verification: { ok: false, status: 'unverified' },
+            warnings: ['EDL 仅确认导入请求成功，未验证素材、帧率与帧边界；60/59.94 fps 不属于已验证可靠路径']
         });
     } catch (e) {
         return Arknight._fail('importEdl', e);
@@ -853,7 +1050,7 @@ Arknight._anyMediaItem = function (bin, depth) {
         if (!it) { continue; }
         var t = '';
         try { t = String(it.type); } catch (e2) { t = ''; }
-        if (t === 'BIN' || t === 'ROOT') {
+        if (t === 'BIN' || t === 'ROOT' || t === '2' || t === '3') {
             var hit = Arknight._anyMediaItem(it, depth + 1);
             if (hit) { return hit; }
             continue;

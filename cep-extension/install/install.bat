@@ -1,4 +1,5 @@
 @echo off
+setlocal
 rem ==============================================================
 rem  Arknight Auto Editing - CEP extension installer (wrapper)
 rem
@@ -25,7 +26,8 @@ rem
 rem  This is a no-op when the BOM is already present, so it also
 rem  protects contributors whose editor strips BOMs on save.
 rem --------------------------------------------------------------
-powershell -NoProfile -Command "$p='%~dp0install.ps1';$b=[IO.File]::ReadAllBytes($p);if($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF){[IO.File]::WriteAllBytes($p,[byte[]](0xEF,0xBB,0xBF)+$b);Write-Host '[info] Added missing UTF-8 BOM to install.ps1'}"
+set "ARKNIGHT_INSTALL_SCRIPT=%~dp0install.ps1"
+powershell -NoProfile -Command "$p=$env:ARKNIGHT_INSTALL_SCRIPT;$b=[IO.File]::ReadAllBytes($p);if($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF){[IO.File]::WriteAllBytes($p,[byte[]](0xEF,0xBB,0xBF)+$b);Write-Host '[info] Added missing UTF-8 BOM to install.ps1'}"
 
 rem Pass through any args, e.g.:
 rem   install.bat -PremiereDir "D:\your-path\Adobe Premiere Pro 2025"

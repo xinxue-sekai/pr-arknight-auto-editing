@@ -33,6 +33,105 @@
     };
 
     let recomputeTimer = null;
+    let mediaEpoch = 0;
+    let sessionVideoPath = '';
+    let editVersion = 0;
+    let resultVersion = -1;
+    let pendingRecompute = false;
+    let pendingMasks = false;
+    let dragging = false;
+    let bridgeTask = null;
+    let preview = null;
+    let needsAnalysis = false;
+    let roiSuggestions = null;
+    const undo = [], redo = [];
+    function snapshot() {
+        const t = state.timeline;
+        return JSON.parse(JSON.stringify({ pauseSegments: t.pauseSegments,
+            clipSegments: t.clipSegments, speedSegments: t.speedSegments }));
+    }
+    function historyButtons() {
+        $('btn-undo').disabled = !undo.length;
+        $('btn-redo').disabled = !redo.length;
+    }
+    function remember() {
+        if (!state.session) return;
+        undo.push(snapshot());
+        if (undo.length > 30) undo.shift();
+        redo.length = 0;
+        historyButtons();
+    }
+    function restore(from, to) {
+        if (!from.length || !state.session || dragging) return;
+        to.push(snapshot());
+        const data = from.pop();
+        data.totalFrames = state.totalFrames; data.fps = state.fps;
+        state.timeline.setData(data, true);
+        updateSelectedInfo(state.selectedPauseId, state.timeline.getPauseById(state.selectedPauseId));
+        onTimelineChange('history');
+        historyButtons();
+    }
+    function navigate(direction) {
+        const segments = state.timeline.pauseSegments;
+        if (!segments.length) return;
+        let i = segments.findIndex(s => s.id === state.selectedPauseId);
+        i = Math.max(0, Math.min(segments.length - 1, i + direction));
+        const seg = segments[i];
+        state.timeline.selectedPauseId = seg.id;
+        updateSelectedInfo(seg.id, seg);
+        if (preview) preview.seek(seg.start);
+    }
+
+
+    function canOutput() {
+        return !needsAnalysis && !state.busy && state.session && state.sessionPath &&
+            sessionVideoPath === state.videoPath &&
+            state.videoPath === ($('video-path').value || '').trim() &&
+            editVersion === resultVersion;
+    }
+
+    function clearRecompute() {
+        if (recomputeTimer !== null) clearTimeout(recomputeTimer);
+        recomputeTimer = null;
+        pendingRecompute = false;
+        pendingMasks = false;
+        dragging = false;
+    }
+
+    function invalidateSession() {
+        clearRecompute();
+        undo.length = 0; redo.length = 0; historyButtons();
+        state.totalFrames = 0;
+        if (preview) preview.configure(30, 0, []);
+        state.session = null;
+        state.sessionPath = '';
+        sessionVideoPath = '';
+        resultVersion = -1;
+        state.timeline.setData({ totalFrames: 0, fps: 30,
+            pauseSegments: [], speedSegments: [], clipSegments: [] }, false);
+        updateSelectedInfo(null, null);
+        updateStats();
+    }
+
+    function currentTask(task) {
+        return !task.cancelled && task.epoch === mediaEpoch;
+    }
+
+    function finishTask(task) {
+        if (bridgeTask !== task) return;
+        bridgeTask = null;
+        if (task.cancelled) {
+            if (task.kind !== 'suggest') clearRecompute();
+            status('已取消，清理完成', 'warn');
+            progress(0, '已取消');
+        }
+        finishBusy();
+    }
+
+    function finishBusy() {
+        setBusy(false);
+        if (pendingRecompute && recomputeTimer === null && !dragging) runRecompute();
+    }
 
     const $ = id => document.getElementById(id);
 
@@ -63,10 +162,16 @@
     function setBusy(busy, label) {
         state.busy = busy;
         $('btn-analyze').disabled = busy || !state.videoPath;
-        $('btn-cancel').disabled = !busy;
-        $('btn-apply').disabled = busy || !state.session;
-        $('btn-edl').disabled = busy || !state.session;
+        $('btn-detect-roi').disabled = busy || !state.videoPath;
+        $('roi-candidate').disabled = busy || !roiSuggestions || !roiSuggestions.candidates.length;
+        $('btn-adopt-roi').disabled = $('roi-candidate').disabled;
+        $('btn-cancel').disabled = !bridgeTask || bridgeTask.cancelled;
+        $('btn-apply').disabled = !canOutput();
+        $('btn-edl').disabled = !canOutput();
         $('btn-recompute').disabled = busy || !state.session;
+        $('btn-import-edl').disabled = busy || !state.session || state.fps >= 59.94;
+        $('btn-save-project').disabled = busy;
+        $('btn-play-cut').disabled = !canOutput();
         if (label) status(label, busy ? 'busy' : 'ok');
     }
 
@@ -96,6 +201,7 @@
             : `Arknight.${fn}(${JSON.stringify(arg)})`;
         return cs.evalJSON(call).then(res => {
             if (res && res.ok === false) {
+                if (res.verification) log('序列回读校验: ' + JSON.stringify(res.verification));
                 throw new Error(`[${res.stage || fn}] ${res.error || '未知错误'}`);
             }
             return res;
@@ -106,6 +212,88 @@
     //  参数收集
     // ------------------------------------------------------------------
 
+    function clearRoiSuggestions() {
+        roiSuggestions = null;
+        $('roi-candidate').innerHTML = '';
+        $('roi-suggestion-info').textContent = '检测仅提供候选叠框，点击“采用此区域”后才应用。';
+    }
+    function showRoiCandidate() {
+        if (!roiSuggestions || roiSuggestions.epoch !== mediaEpoch) return;
+        const c = roiSuggestions.candidates[Number($('roi-candidate').value)];
+        if (!c) return;
+        if (preview) { preview.pause(); preview.setContentRect(c.content_rect); }
+        const text = value => typeof value === 'string' ? value : JSON.stringify(value);
+        $('roi-suggestion-info').textContent = '候选预览，尚未采用 · ' + c.kind +
+            ' · 置信度 ' + c.confidence + ' · 依据：' + text(c.evidence) +
+            (c.warning ? ' · 警告：' + text(c.warning) : '') +
+            ' · 采样帧：' + text(roiSuggestions.sampled_indices || []) +
+            ' · 源尺寸：' + text(roiSuggestions.source_size || {}) +
+            ' · 限制：' + text(roiSuggestions.limitations || []);
+    }
+    async function detectContentRect() {
+        if (state.busy || !state.videoPath) return;
+        const epoch = mediaEpoch, path = state.videoPath;
+        const task = { epoch: epoch, cancelled: false, kind: 'suggest' };
+        bridgeTask = task;
+        clearRoiSuggestions();
+        if (preview) preview.setContentRect(contentRect());
+        setBusy(true, '正在检测游戏区域…');
+        try {
+            const result = await B.suggestContentRect(path, timeoutOpt());
+            if (!currentTask(task)) return;
+            roiSuggestions = Object.assign({}, result, { epoch: epoch,
+                candidates: (result.candidates || []).filter(c => c.content_rect &&
+                    ['x', 'y', 'width', 'height'].every(k => Number.isInteger(c.content_rect[k])) &&
+                    c.content_rect.x >= 0 && c.content_rect.y >= 0 &&
+                    c.content_rect.width > 0 && c.content_rect.height > 0) });
+            roiSuggestions.candidates.forEach((candidate, i) => {
+                const option = document.createElement('option');
+                option.value = String(i);
+                option.textContent = (i + 1) + ' · ' + candidate.kind;
+                $('roi-candidate').appendChild(option);
+            });
+            $('roi-candidate').value = '0';
+            if (roiSuggestions.candidates.length) showRoiCandidate();
+            else $('roi-suggestion-info').textContent = '未找到可用候选。限制：' + JSON.stringify(result.limitations || []);
+            status('区域检测完成，尚未应用；请审阅后采用', 'warn');
+        } catch (e) {
+            if (!currentTask(task) || (B.CODE && e.code === B.CODE.CANCELLED)) return;
+            status('游戏区域检测失败', 'err');
+            $('roi-suggestion-info').textContent = e.message;
+            log('区域检测失败: ' + e.message);
+        } finally { finishTask(task); }
+    }
+    function adoptContentRect() {
+        if (state.busy || !roiSuggestions || roiSuggestions.epoch !== mediaEpoch) return;
+        const candidate = roiSuggestions.candidates[Number($('roi-candidate').value)];
+        if (!candidate) return;
+        const rect = candidate.content_rect;
+        ['x', 'y', 'width', 'height'].forEach(key => { $('roi-' + key).value = rect[key]; });
+        $('roi-enabled').checked = true;
+        changeContentRect();
+        $('roi-suggestion-info').textContent = '已采用所选区域；分析将使用此区域。';
+    }
+    function contentRect() {
+        if (!$('roi-enabled').checked) return null;
+        return { x: Math.floor(num('roi-x', 0)), y: Math.floor(num('roi-y', 0)),
+            width: Math.floor(num('roi-width', 0)), height: Math.floor(num('roi-height', 0)) };
+    }
+    function refreshContentRectState() {
+        const rect = contentRect();
+        const analyzed = state.session && state.session.params && state.session.params.content_rect;
+        needsAnalysis = !!state.session && (rect && analyzed
+            ? ['x', 'y', 'width', 'height'].some(key => rect[key] !== analyzed[key])
+            : !!rect !== !!analyzed);
+    }
+    function changeContentRect() {
+        clearRoiSuggestions();
+        refreshContentRectState();
+        if (preview) { preview.pause(); preview.setContentRect(contentRect()); }
+        setBusy(state.busy);
+        if (needsAnalysis) status('内容区域已改变，请重新分析素材', 'warn');
+        else if (state.session) status('内容区域与当前分析一致', 'ok');
+        if (!needsAnalysis && pendingRecompute && recomputeTimer === null && !dragging) runRecompute();
+    }
     function collectParams() {
         const threads = Math.floor(num('p-threads', 0));
         const p = {
@@ -121,7 +309,8 @@
             compare: {
                 still_time_thresh: num('p-still', 0.1),
                 motion_thresh: num('p-motion', 2.0),
-                boundary_thresh: num('p-boundary', 5.0)
+                boundary_thresh: num('p-boundary', 5.0),
+                strict_static_enabled: $('p-strict-static').checked === true
             },
             decode_backend: $('p-backend').value || 'opencv',
             // Premiere 时间轴无法承载抽帧产生的大量单帧碎片，变速统一走标记提示
@@ -136,6 +325,8 @@
         };
         // 0 表示「用满所有核心」，此时不传该字段，交给 Python 取默认值
         if (threads > 0) p.threads = threads;
+        const rect = contentRect();
+        if (rect) p.content_rect = rect;
         return p;
     }
 
@@ -151,6 +342,7 @@
             set('p-thr-2x', p.thresholds.speed_2x);
             set('p-thr-02x', p.thresholds.speed_0_2x);
         }
+        $('p-strict-static').checked = !!(p.compare && p.compare.strict_static_enabled === true);
         if (p.compare) {
             set('p-still', p.compare.still_time_thresh);
             set('p-motion', p.compare.motion_thresh);
@@ -170,6 +362,7 @@
 
     function applySession(session, preserveView) {
         state.session = session;
+        refreshContentRectState();
         state.sessionPath = session.__sessionPath || state.sessionPath;
         state.fps = session.fps || 30;
         state.totalFrames = session.total_frames || 0;
@@ -188,8 +381,8 @@
                                state.timeline.getPauseById(state.timeline.selectedPauseId));
         }
 
+        if (preview) preview.configure(state.fps, state.totalFrames, session.keep_ranges);
         updateStats();
-        setBusy(false);
     }
 
     function updateStats() {
@@ -213,12 +406,13 @@
 
     function updateSelectedInfo(pauseId, seg) {
         state.selectedPauseId = pauseId;
+        if (preview) preview.compare(seg);
         const el = $('selected-info');
         if (pauseId === null || !seg) {
             el.textContent = '未选中任何暂停片段（在时间轴暂停带上左键点击）';
             return;
         }
-        const modeName = { keep: '全部保留', auto: '按设置裁剪', all: '全部裁剪' }[seg.mode] || seg.mode;
+        const modeName = { keep: '全部保留', auto: '自动判断', all: '全部裁剪' }[seg.mode] || seg.mode;
         const len = seg.end - seg.start + 1;
         el.innerHTML =
             `已选 <b>ID ${seg.id}</b> · 帧 ${seg.start}~${seg.end}（${len} 帧 / ${(len / state.fps).toFixed(2)}s）<br>` +
@@ -282,13 +476,24 @@
     }
 
     function setVideoPath(p) {
-        if (!p) return;
+        p = (p || '').trim();
+        if (p !== state.videoPath) {
+            mediaEpoch++;
+            clearRoiSuggestions();
+            if (preview) preview.open(p);
+            invalidateSession();
+            if (bridgeTask) {
+                bridgeTask.cancelled = true;
+                B.cancel();
+            }
+        }
         state.videoPath = p;
         $('video-path').value = p;
-        $('btn-analyze').disabled = state.busy;
+        setBusy(state.busy);
         // EDL 默认与源素材同目录
-        $('edl-path').value = B.defaultEdlPath(p);
-        status('素材已选定，可以开始分析', 'ok');
+        $('edl-path').value = p ? B.defaultEdlPath(p) : '';
+        status(state.busy ? '正在等待当前任务结束…' :
+            (p ? '素材已选定，可以开始分析' : '请先指定源素材'), state.busy ? 'busy' : 'ok');
     }
 
     // ------------------------------------------------------------------
@@ -296,9 +501,18 @@
     // ------------------------------------------------------------------
 
     async function startAnalyze() {
+        if (state.busy) return;
         const vp = ($('video-path').value || '').trim();
         if (!vp) { status('请先指定源素材', 'warn'); return; }
-        state.videoPath = vp;
+        setVideoPath(vp);
+        const rect = contentRect();
+        if (rect && (rect.x < 0 || rect.y < 0 || rect.width <= 0 || rect.height <= 0)) {
+            status('内容区域须为非负坐标与正数宽高', 'warn'); return;
+        }
+        needsAnalysis = false;
+        invalidateSession();
+        const task = { epoch: mediaEpoch, cancelled: false };
+        bridgeTask = task;
 
         setBusy(true, '正在启动 Python 分析…');
         progress(0, '准备中');
@@ -308,7 +522,14 @@
         try {
             const r = await B.analyze(vp, collectParams(), Object.assign({
                 onProgress: m => {
-                    progress(m.ratio, `${m.message || m.stage}  ${Math.round(m.ratio * 100)}%`);
+                    if (!currentTask(task)) return;
+                    const details = [m.message || m.stage || '分析中'];
+                    if (Number.isFinite(m.ratio)) details.push(Math.round(m.ratio * 100) + '%');
+                    if (Number.isFinite(m.processed_frames)) details.push(m.processed_frames +
+                        (Number.isFinite(m.total_frames) ? '/' + m.total_frames : '') + ' 帧');
+                    if (Number.isFinite(m.processing_fps)) details.push(m.processing_fps.toFixed(1) + ' 帧/秒');
+                    if (Number.isFinite(m.stage_ratio)) details.push('当前阶段 ' + Math.round(m.stage_ratio * 100) + '%');
+                    progress(Number.isFinite(m.ratio) ? m.ratio : 0, details.join(' · '));
                     status(m.message || '分析中…', 'busy');
                 },
                 onLog: s => {
@@ -318,16 +539,20 @@
                 }
             }, timeoutOpt()));
 
+            if (!currentTask(task)) return;
             const session = r.session;
             session.__sessionPath = r.sessionPath;
+            sessionVideoPath = vp;
+            resultVersion = editVersion;
             state._lastErr = '';
 
             applySession(session, false);
             paramsToForm(session.params);
-            $('btn-import-edl').disabled = false;
+            $('btn-import-edl').disabled = state.fps >= 59.94;
 
             const st = session.stats || {};
-            status(`分析完成：${(session.pause_segments || []).length} 处暂停，保留 ${Math.round((st.ratio || 0) * 100)}%`, 'ok');
+            status(needsAnalysis ? '内容区域已改变，请重新分析素材' :
+                `分析完成：${(session.pause_segments || []).length} 处暂停，保留 ${Math.round((st.ratio || 0) * 100)}%`, needsAnalysis ? 'warn' : 'ok');
             log(`分析完成 L=${session.total_frames} fps=${session.fps} ` +
                 `pauses=${(session.pause_segments || []).length} ` +
                 `speeds=${(session.speed_segments || []).length} ` +
@@ -339,7 +564,7 @@
                 log('提示：未识别到任何暂停段。请检查 templates_pause/ 里的模板是否与本次录屏的分辨率/UI 匹配，或适当调低「暂停」匹配阈值。');
             }
         } catch (e) {
-            setBusy(false);
+            if (!currentTask(task)) return;
             // 用户主动取消不是错误，cancelAnalyze 已经报过状态了，这里不再刷屏
             if (B.CODE && e.code === B.CODE.CANCELLED) return;
 
@@ -352,16 +577,23 @@
             if (tail && !e.detail) log('Python stderr 末尾:\n' + tail.split('\n').slice(-8).join('\n'));
             const hint = hintFor(e);
             if (hint) log(hint);
+        } finally {
+            finishTask(task);
         }
     }
 
     function cancelAnalyze() {
-        if (B.cancel()) {
-            status('已取消', 'warn');
-            progress(0, '已取消');
-            setBusy(false);
-            log('用户取消了分析');
+        if (!bridgeTask || bridgeTask.cancelled) return;
+        bridgeTask.cancelled = true;
+        if (bridgeTask.kind !== 'suggest') {
+            clearRecompute();
+            resultVersion = -1;
         }
+        B.cancel();
+        status('已取消，正在等待清理结束…', 'warn');
+        progress(0, '已取消');
+        setBusy(true);
+        log('用户取消了任务');
     }
 
     // ------------------------------------------------------------------
@@ -372,45 +604,83 @@
      * @param {boolean} recomputeMasks true = 用最新阈值重算每段内部掩码与边界判定
      *                                 false = 仅按用户的手动编辑重算保留区间
      */
-    async function recompute(recomputeMasks) {
+    function recompute(recomputeMasks) {
         if (!state.session || !state.sessionPath) return;
-        if (state.busy) return;
+        editVersion++;
+        pendingRecompute = true;
+        pendingMasks = pendingMasks || !!recomputeMasks;
+        if (recomputeTimer !== null) clearTimeout(recomputeTimer);
+        recomputeTimer = null;
+        setBusy(state.busy);
+        return runRecompute();
+    }
 
+    async function runRecompute() {
+        if (needsAnalysis || state.busy || !pendingRecompute || dragging || !state.session) return;
+        const task = { epoch: mediaEpoch, cancelled: false, version: editVersion };
+        const sessionPath = state.sessionPath;
+        const recomputeMasks = pendingMasks;
+        pendingRecompute = false;
+        pendingMasks = false;
+        bridgeTask = task;
         const tl = state.timeline;
-        const overrides = {
+        // 与可编辑时间轴脱离引用，保证请求对应确定的编辑版本。
+        const overrides = JSON.parse(JSON.stringify({
             pause_segments: tl.pauseSegments,
             clip_segments: tl.clipSegments,
             speed_segments: tl.speedSegments,
-            recompute_masks: !!recomputeMasks
-        };
+            recompute_masks: recomputeMasks
+        }));
 
         setBusy(true, recomputeMasks ? '正在按新参数重算…' : '正在重算保留区间…');
         try {
-            const r = await B.recompute(state.sessionPath, overrides, collectParams(), timeoutOpt());
+            const r = await B.recompute(sessionPath, overrides, collectParams(), timeoutOpt());
+            if (!currentTask(task)) return;
+            if (task.version !== editVersion) {
+                pendingMasks = pendingMasks || recomputeMasks;
+                return;
+            }
             const session = r.session;
-            session.__sessionPath = state.sessionPath;
+            session.__sessionPath = sessionPath;
+            resultVersion = task.version;
             applySession(session, true);
             status('已重算', 'ok');
             log(`重算完成 ranges=${(session.keep_ranges || []).length} ` +
                 `kept=${(session.stats || {}).segment_count} 段`);
         } catch (e) {
-            setBusy(false);
+            if (!currentTask(task)) return;
+            pendingMasks = pendingMasks || recomputeMasks;
             if (B.CODE && e.code === B.CODE.CANCELLED) return;
-            status('重算失败', 'err');
+            const protocolHints = {
+                REANALYZE_REQUIRED: '分析级参数已改变，请重新分析素材',
+                CLIP_EDITS_RESET_REQUIRED: '重新分类需要先恢复裁剪手柄；当前编辑已保留，未自动清除',
+                BOUNDARY_READ_REQUIRED: '需要按原解码方式补读边界，或重新分析素材'
+            };
+            status(protocolHints[e.backendCode || e.code] || '重算失败', 'err');
             log('重算失败: ' + e.message);
             if (e.detail) log(e.detail.split('\n').slice(-6).join('\n'));
             const hint = hintFor(e);
             if (hint) log(hint);
+        } finally {
+            finishTask(task);
         }
     }
 
-    /** 时间轴交互回调：拖拽过程中不重算，松手后统一算一次。 */
+    /** 编辑立即使输出失效；拖拽只在松手后提交，运行中编辑排队。 */
     function onTimelineChange(kind) {
-        if (kind === 'handle') return;   // 拖动中，先只重绘
-        if (recomputeTimer) clearTimeout(recomputeTimer);
+        if (!state.session) return;
+        editVersion++;
+        pendingRecompute = true;
+        pendingMasks = pendingMasks || kind === 'auto';
+        if (preview) preview.pause();
+        dragging = kind === 'handle';
+        setBusy(state.busy);
+        if (recomputeTimer !== null) clearTimeout(recomputeTimer);
+        recomputeTimer = null;
+        if (dragging || (bridgeTask && bridgeTask.cancelled)) return;
         recomputeTimer = setTimeout(() => {
             recomputeTimer = null;
-            recompute(false);
+            runRecompute();
         }, 220);
     }
 
@@ -419,7 +689,9 @@
     // ------------------------------------------------------------------
 
     async function applyToPremiere() {
-        if (!state.session) { status('请先分析', 'warn'); return; }
+        if (!canOutput()) { status('请等待当前素材的最新分析或重算完成', 'warn'); return; }
+        const outputSession = state.session;
+        const outputFps = state.fps;
         const ranges = state.session.keep_ranges || [];
         if (!ranges.length) { status('没有可落地的保留区间', 'warn'); return; }
         if (!state.videoPath) { status('缺少源素材路径', 'warn'); return; }
@@ -444,48 +716,60 @@
             const p = B.writePayload('apply.json', payload);
             const res = await jsx('applyEdit', p);
 
-            setBusy(false);
             // clipsInSequence 是从序列里读回的真实数量，-1 表示读不到
             const landed = res.clipsInSequence;
             const mismatch = landed >= 0 && landed !== res.subclipsCreated;
             const msg = `已生成序列「${res.sequenceName}」：${landed >= 0 ? landed : res.subclipsCreated} 段，` +
                         `${res.markersAdded} 个变速标记`;
-            status(msg, (res.clipsFailed > 0 || mismatch) ? 'warn' : 'ok');
-            log(`落地成功 subclips=${res.subclipsCreated} inSeq=${landed} ` +
+            const verification = res.verification || {};
+            const warnings = [].concat(res.warnings || [], verification.warnings || [])
+                .filter((text, index, all) => text && all.indexOf(text) === index);
+            const unverified = verification.ok !== true || verification.status === 'partial' ||
+                verification.sourcePointsVerified !== true;
+            if (unverified) warnings.unshift('源帧精度未完整验证');
+            const warningSummary = warnings.slice(0, 3).join('；') +
+                (warnings.length > 3 ? '（更多见诊断日志）' : '');
+            status(msg + (warningSummary ? ' · ' + warningSummary : ''),
+                (res.clipsFailed > 0 || mismatch || unverified || warnings.length) ? 'warn' : 'ok');
+            warnings.forEach(text => log('校验提示: ' + text));
+            if (res.verification) log('序列回读校验: ' + JSON.stringify(res.verification));
+            log(`序列已生成 subclips=${res.subclipsCreated} inSeq=${landed} ` +
                 `failed=${res.clipsFailed} markers=${res.markersAdded} ` +
                 `seqFps=${res.sequenceFps} endTicks=${res.sequenceEndTicks}`);
 
             if (mismatch) {
                 log(`⚠ 序列内实际 ${landed} 段，与创建的 ${res.subclipsCreated} 个子剪辑不符。` +
                     `可能是 createNewSequenceFromClips 未全部插入，请检查时间轴；` +
-                    `必要时改用「导出 EDL」→「导入 EDL」。`);
+                    `EDL 仅为未验证的视频-only实验路径。`);
             }
 
             // 帧对齐校验：序列实际时长应等于 Python 算出的保留帧数
-            const st = state.session.stats || {};
+            const st = outputSession.stats || {};
             const expectTicks = String(Math.round(
-                (st.kept_frames || 0) * (254016000000 / state.fps)));
+                (st.kept_frames || 0) * (254016000000 / outputFps)));
             if (res.sequenceEndTicks && expectTicks &&
-                Math.abs(Number(res.sequenceEndTicks) - Number(expectTicks)) > Number(expectTicks) * 0.01) {
+                Math.abs(Number(res.sequenceEndTicks) - Number(expectTicks)) > (254016000000 / outputFps) * 0.5) {
                 log(`⚠ 时长校验偏差：序列 ${res.sequenceEndTicks} ticks，预期约 ${expectTicks} ticks。` +
-                    `可能是源素材起始 tick 不为 0，请在 hostscript 的 sourceOffsetTicks 里校正。`);
-                status('已落地，但时长有偏差（见日志）', 'warn');
+                    `请检查序列与宿主回读；源点坐标语义尚未确认，不能据时长推断偏移。`);
+                status('已生成序列，但时长有偏差（见日志）' +
+                    (warningSummary ? ' · ' + warningSummary : ''), 'warn');
             }
 
             if (res.clipsFailed > 0) {
                 log(`⚠ 有 ${res.clipsFailed} 段子剪辑创建失败，前若干条：` +
                     JSON.stringify(res.failedDetail || []));
-                log('若失败数量很多，说明当前 Premiere 版本对 createSubClip 支持不佳，建议改用「导出 EDL」→「导入 EDL」。');
+                log('若失败数量很多，说明当前 Premiere 版本对 createSubClip 支持不佳，请检查诊断日志与 Premiere 序列。');
             }
             if (res.markersAdded > 0) {
                 log('提示：请在时间轴上逐个查看橙色标记，选中对应片段后右键 →「速度/持续时间」按标记建议值设置。' +
                     'Premiere 的插件 API（ExtendScript 与 UXP 均如此）无法直接修改片段速度，这一步只能手动完成。');
             }
         } catch (e) {
-            setBusy(false);
             status('落地失败', 'err');
             log('applyEdit 失败: ' + e.message);
-            log('建议改用「导出 EDL」→「导入 EDL」路径，兼容性更好。');
+            log('请检查诊断日志与 Premiere 序列。');
+        } finally {
+            finishBusy();
         }
     }
 
@@ -494,45 +778,51 @@
     // ------------------------------------------------------------------
 
     async function exportEdl() {
-        if (!state.session) { status('请先分析', 'warn'); return; }
+        if (!canOutput()) { status('请等待当前素材的最新分析或重算完成', 'warn'); return; }
         const out = ($('edl-path').value || '').trim();
         if (!out) { status('请填写 EDL 输出路径', 'warn'); return; }
 
+        const task = { epoch: mediaEpoch, cancelled: false };
+        bridgeTask = task;
         setBusy(true, '正在生成 EDL…');
         try {
             const clipName = state.hostInfo && state.hostInfo.candidates && state.hostInfo.candidates[0]
                 ? state.hostInfo.candidates[0].name : '';
             const r = await B.exportEdl(state.sessionPath, out, clipName,
                                         state.session.keep_ranges);
-            setBusy(false);
+            if (!currentTask(task)) return;
             $('edl-path').value = r.edl_path;
-            $('btn-import-edl').disabled = false;
+            $('btn-import-edl').disabled = state.fps >= 59.94;
             status(`EDL 已生成：${r.events} 条事件 / ${r.record_seconds}s`, 'ok');
             log(`EDL → ${r.edl_path}  events=${r.events} record=${r.record_frames}帧`);
         } catch (e) {
-            setBusy(false);
+            if (!currentTask(task) || (B.CODE && e.code === B.CODE.CANCELLED)) return;
             status('EDL 导出失败', 'err');
             log('EDL 导出失败: ' + e.message);
             if (e.detail) log(e.detail.split('\n').slice(-6).join('\n'));
             const hint = hintFor(e);
             if (hint) log(hint);
+        } finally {
+            finishTask(task);
         }
     }
 
     async function importEdl() {
+        if (state.busy) return;
+        if (state.fps >= 59.94) { status('60fps EDL 导入已禁用；实验 EDL 为视频-only，尚未验证', 'warn'); return; }
         const p = ($('edl-path').value || '').trim();
         if (!p) { status('请先导出或填写 EDL 路径', 'warn'); return; }
         setBusy(true, '正在导入 EDL…');
         try {
             const res = await jsx('importEdl', p);
-            setBusy(false);
             status(`EDL 已导入，新建 ${res.newSequenceIds.length} 条序列`, 'ok');
             log('importEdl 成功: ' + JSON.stringify(res.newSequenceIds));
         } catch (e) {
-            setBusy(false);
             status('EDL 导入失败', 'err');
             log('importEdl 失败: ' + e.message);
             log('可手动导入：Premiere → 文件 → 导入 → 选择该 .edl 文件。');
+        } finally {
+            finishBusy();
         }
     }
 
@@ -684,6 +974,42 @@
     // ------------------------------------------------------------------
 
     function bindEvents() {
+        $('btn-detect-roi').addEventListener('click', detectContentRect);
+        $('roi-candidate').addEventListener('change', showRoiCandidate);
+        $('btn-adopt-roi').addEventListener('click', adoptContentRect);
+        ['roi-enabled', 'roi-x', 'roi-y', 'roi-width', 'roi-height'].forEach(id => {
+            $(id).addEventListener('change', changeContentRect);
+            $(id).addEventListener('input', changeContentRect);
+        });
+        $('btn-undo').addEventListener('click', () => restore(undo, redo));
+        $('btn-redo').addEventListener('click', () => restore(redo, undo));
+        $('btn-prev-seg').addEventListener('click', () => navigate(-1));
+        $('btn-next-seg').addEventListener('click', () => navigate(1));
+        $('btn-prev-frame').addEventListener('click', () => preview.seek(preview.frame - 1));
+        $('btn-next-frame').addEventListener('click', () => preview.seek(preview.frame + 1));
+        $('btn-play-source').addEventListener('click', () => preview.play(false));
+        $('btn-play-cut').addEventListener('click', () => { if (canOutput()) preview.play(true); });
+        $('btn-save-project').addEventListener('click', async () => {
+            if (state.busy) return;
+            setBusy(true, '正在保存 Premiere 项目…');
+            try { await jsx('saveProject'); status('Premiere 项目已保存', 'ok'); }
+            catch (e) { status('保存项目失败', 'err'); log(e.message); }
+            finally { finishBusy(); }
+        });
+        $('review').addEventListener('keydown', e => {
+            if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+            if (!preview || !state.session) return;
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                e.preventDefault(); if (e.shiftKey) restore(redo, undo); else restore(undo, redo);
+            } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+                if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                    e.preventDefault(); preview.seek(preview.frame + (e.key === 'ArrowLeft' ? -1 : 1));
+                } else if (e.key === ' ') { e.preventDefault(); preview.play(false); }
+                else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                    e.preventDefault(); navigate(e.key === 'ArrowUp' ? -1 : 1);
+                }
+            }
+        });
         $('btn-pick').addEventListener('click', pickFromPR);
         $('btn-analyze').addEventListener('click', startAnalyze);
         $('btn-cancel').addEventListener('click', cancelAnalyze);
@@ -696,10 +1022,21 @@
         $('btn-save-cfg').addEventListener('click', () => {
             const py = ($('s-python').value || '').trim();
             const dir = ($('s-clidir').value || '').trim();
-            B.saveConfig({ pythonPath: py || null, cliDir: dir || null });
+            if (!B.saveConfig({ pythonPath: py || null, cliDir: dir || null })) {
+                status('保存设置失败，请检查配置目录写入权限', 'err');
+                log('设置未保存到 ' + B.paths.CONFIG_PATH);
+                return;
+            }
             // 重新解析，让新配置立刻生效
             B.getState().python = null;
             B.init(resolveExtDir());
+            if (preview && state.videoPath) {
+                preview.open(state.videoPath);
+                preview.setContentRect(contentRect());
+                preview.configure(state.fps, state.totalFrames,
+                    state.session ? state.session.keep_ranges : []);
+                preview.compare(state.timeline.getPauseById(state.selectedPauseId));
+            }
             $('s-python').value = B.getConfig().pythonPath || '';
             $('s-clidir').value = B.getConfig().cliDir || '';
             log('设置已保存到 ' + B.paths.CONFIG_PATH);
@@ -721,10 +1058,8 @@
             });
         });
 
-        $('video-path').addEventListener('change', e => {
-            const v = e.target.value.trim();
-            if (v) { state.videoPath = v; $('edl-path').value = B.defaultEdlPath(v); $('btn-analyze').disabled = false; }
-        });
+        $('video-path').addEventListener('input', e => setVideoPath(e.target.value));
+        $('video-path').addEventListener('change', e => setVideoPath(e.target.value));
 
         window.addEventListener('resize', () => state.timeline.resize());
     }
@@ -754,6 +1089,17 @@
         state.timeline = new window.ArknightTimeline($('timeline'));
         state.timeline.onSelect = (id, seg) => updateSelectedInfo(id, seg);
         state.timeline.onChange = onTimelineChange;
+        state.timeline.onEditStart = remember;
+        preview = new window.ArknightPreview({ main: $('preview-main'), before: $('preview-before'),
+            after: $('preview-after'), video: $('preview-video'), status: $('preview-status'), overlay: $('content-rect-overlay') }, (frame, info) => {
+            state.timeline.ensureVisible(frame);
+            const total = info ? info.totalFrames : state.totalFrames;
+            const suffix = info && info.metadataStatus === 'estimate' ? '（预览估计，待分析确认）' : '';
+            $('frame-label').textContent = '源帧 ' + frame + ' / ' +
+                (total > 0 ? total - 1 : '未知') + suffix;
+        });
+        state.timeline.onSeek = frame => preview.seek(frame);
+        historyButtons();
 
         bindEvents();
         log('面板已加载，扩展目录: ' + extDir);
@@ -774,9 +1120,15 @@
         }
     }
 
+    function boot() {
+        init().catch(e => {
+            status('面板初始化失败', 'err');
+            log('初始化失败: ' + e.message);
+        });
+    }
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
+        document.addEventListener('DOMContentLoaded', boot);
     } else {
-        init();
+        boot();
     }
 })();

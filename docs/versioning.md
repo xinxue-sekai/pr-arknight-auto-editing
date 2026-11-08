@@ -9,7 +9,7 @@
 
 | 版本位 | 语义 | 本项目的判据 |
 |---|---|---|
-| **MAJOR** | 不兼容 | 需要用户重配环境；manifest 的 `Host` 范围收缩；`config.json` 格式不兼容；与外部分析器的 NDJSON 接口破坏性变更 |
+| **MAJOR** | 不兼容 | 需要用户重配环境；manifest 的 `Host` 范围收缩；`config.json` 格式不兼容；与后端的 NDJSON 接口破坏性变更 |
 | **MINOR** | 兼容新增 | 新增面板功能；新增落地方式；支持新的 Premiere 版本；新增 CLI 子命令 |
 | **PATCH** | 兼容修复 | 修 bug；改文案；调默认参数；打包/CI/文档改进 |
 
@@ -18,7 +18,15 @@
 
 ## 唯一的版本源
 
-**`cep-extension/CSXS/manifest.xml` 的 `ExtensionBundle@Version`。**
+**`cep-extension/CSXS/manifest.xml` 的 `ExtensionManifest@ExtensionBundleVersion`。**
+
+根元素 `ExtensionManifest@Version="7.0"` 是 **CEP 清单 schema 版本**，不是发布版本。
+`ExtensionBundleId` 保持 `com.arknight.autoediting`；`ExtensionList` 声明的面板 ID
+必须与 `DispatchInfoList` 一致（`com.arknight.autoediting.panel`）。
+若 `ExtensionList/Extension@Version` 已声明，发布时也应同步更新。
+检查、打包、包验证、Release 与 ZXP 工具共用 `tools/manifest.js` 的结构校验；
+`tools/check.js` 同时运行 `tools/test-manifest.js`，防止旧根元素、缺失 schema
+版本或不匹配的面板 ID 回归。这是项目所需结构校验，不是完整 Adobe XSD 验证。
 
 其他任何地方（文档、Release 说明、zip 文件名）引用版本号都必须指向它，
 不允许手抄第二份。`.github/workflows/release.yml` 会强制校验
@@ -42,18 +50,15 @@
 2. `checkCapabilities` 在目标版本范围（至少 25.x 与一个更低版本）上表现正常
 3. 至少一份真实录像完成过「分析 → 时间轴微调 → 落地」全流程
 
-**当前进展（2026-11-08）**：使用者已确认完成真机验证，原先的核心链路与真实
-素材验证待办已关闭；本次未附逐项测试记录，不据此扩大版本或素材覆盖范围。
-当前已记录的宿主版本为 25.3.0，更低版本的兼容性验证尚未记录。
+**当前进展（2026-11-08）**：当前版本为 **0.2.0**，内置 backend、统一安装和预览属于兼容新增功能，按 MINOR 升级。保留历史 v0.1.1 tag，不覆盖旧版历史。
 
-本次状态同步不自动升级到 1.0.0，也不改动既有发布 tag。上述发布门槛继续用于
-评估稳定版；补齐跨版本验证与测试记录后，再决定是否发布 1.0.0。
+已记录的宿主版本为 25.3.0，旧项目重开、当前面板预览及保存按钮已有真机证据，见[全面自检](self-check-2026-11-08.md)。新版完整链路、源点/音频精度与更低版本兼容性仍待验证；不将早期使用者确认或模拟测试视为全部门槛通过。详见 [v0.2.0 发布说明](releases/v0.2.0.md)。
 
 ## 发布流程
 
 ```
 1. 确认 main 分支 CI 为绿
-2. 更新 manifest 的 ExtensionBundle@Version
+2. 更新 manifest 的 ExtensionManifest@ExtensionBundleVersion
 3. 把 CHANGELOG.md 的 [Unreleased] 段封版为 [x.y.z] - 日期，另起新的 [Unreleased]
 4. 本地跑全套检查（见 CONTRIBUTING.md）
 5. git commit -m "release: vX.Y.Z"（或描述性中文信息）
@@ -69,7 +74,7 @@
 
 **按需发布，不定固定周期。** 这个项目的真实节奏取决于：
 
-- 上游分析器（外部项目）是否有接口变更
+- 内置后端与上游分析器是否有接口或算法变更
 - 不同 Premiere 版本的兼容性反馈
 
 一条纪律：**任何改了 manifest 的 `Host` 范围或 `config.json` 格式的提交，

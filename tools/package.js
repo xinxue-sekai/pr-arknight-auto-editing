@@ -4,7 +4,7 @@
  *
  * 为什么需要它：
  *   仓库里的扩展目录叫 `cep-extension/`，而 CEP 要求**目录名必须等于
- *   manifest 里的 ExtensionBundle@Id**（`com.arknight.autoediting`）。
+ *   manifest 里的 ExtensionManifest@ExtensionBundleId**（`com.arknight.autoediting`）。
  *   直接下载源码压缩包的人会拿到一个名字不对的目录，手工改名既麻烦又容易出错。
  *   本脚本负责改名、剔除不该发给用户的东西、并压成 zip。
  *
@@ -30,14 +30,7 @@ const KEEP_DEBUG = process.argv.indexOf('--keep-debug') >= 0;
 
 // 扩展 Id 以 manifest 为唯一来源，避免两处手写不一致
 const manifestXml = fs.readFileSync(path.join(SRC, 'CSXS', 'manifest.xml'), 'utf8');
-const idMatch = manifestXml.match(/<ExtensionBundle\b[^>]*\bId\s*=\s*"([^"]+)"/);
-if (!idMatch) {
-    console.error('无法从 manifest.xml 读出 ExtensionBundle@Id');
-    process.exit(1);
-}
-const EXT_ID = idMatch[1];
-const versionMatch = manifestXml.match(/<ExtensionBundle\b[^>]*\bVersion\s*=\s*"([^"]+)"/);
-const VERSION = versionMatch ? versionMatch[1] : '0.0.0';
+const { bundleId: EXT_ID, version: VERSION } = require('./manifest').parseManifest(manifestXml);
 
 const STAGE = path.join(DIST, EXT_ID);
 
@@ -85,7 +78,7 @@ function dirSize(p) {
 
 console.log(`\n打包 ${EXT_ID} v${VERSION}${KEEP_DEBUG ? '（保留 .debug）' : ''}\n`);
 
-rmrf(DIST);
+rmrf(STAGE);
 fs.mkdirSync(DIST, { recursive: true });
 
 const skipped = [];
@@ -107,6 +100,7 @@ const shouldSkip = (rel, entry) => {
 };
 
 copyFiltered(SRC, STAGE, shouldSkip, '');
+fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(STAGE, 'LICENSE'));
 
 console.log('已暂存到 dist/' + EXT_ID + '/');
 if (skipped.length) {
@@ -124,6 +118,9 @@ const REQUIRED = [
     'js/main.js',
     'js/bridge.js',
     'js/timeline.js',
+    'js/preview.js',
+    'js/preview-bridge.js',
+    'LICENSE',
     'js/csinterface.js',
     'css/style.css'
 ];
@@ -167,122 +164,7 @@ const zipPath = path.join(DIST, zipName);
  * 内置写入器零依赖、全平台产物一致；verify-package.js 用另一套
  * 代码独立解析校验，防这里写错。
  */
-const zlib = require('zlib');
-
-const CRC_TABLE = (() => {
-    const t = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-        let c = n;
-        for (let k = 0; k < 8; k++) { c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1); }
-        t[n] = c >>> 0;
-    }
-    return t;
-})();
-
-function crc32(buf) {
-    let c = 0xffffffff;
-    for (let i = 0; i < buf.length; i++) { c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8); }
-    return (c ^ 0xffffffff) >>> 0;
-}
-
-function dosDateTime(d) {
-    const year = Math.max(1980, d.getFullYear());
-    const date = (((year - 1980) & 0x7f) << 9)
-               | (((d.getMonth() + 1) & 0xf) << 5)
-               | (d.getDate() & 0x1f);
-    const time = ((d.getHours() & 0x1f) << 11)
-               | ((d.getMinutes() & 0x3f) << 5)
-               | ((d.getSeconds() / 2) & 0x1f);
-    return { date, time };
-}
-
-function listFiles(dir, rel) {
-    const out = [];
-    const entries = fs.readdirSync(dir, { withFileTypes: true })
-        .sort((a, b) => (a.name < b.name ? -1 : 1));
-    for (const entry of entries) {
-        const relPath = rel ? rel + '/' + entry.name : entry.name;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            out.push(...listFiles(full, relPath));
-        } else {
-            out.push({ full, relPath });
-        }
-    }
-    return out;
-}
-
-function writeZip(stageDir, outPath) {
-    // 条目名以暂存目录名（即扩展 Id）为顶层前缀，保证解压出一个目录
-    const files = listFiles(stageDir, path.basename(stageDir));
-    const parts = [];
-    const central = [];
-    let offset = 0;
-
-    for (const f of files) {
-        const data = fs.readFileSync(f.full);
-        const comp = zlib.deflateRawSync(data);
-        const useDeflate = comp.length < data.length;
-        const body = useDeflate ? comp : data;
-        const method = useDeflate ? 8 : 0;
-        const crc = crc32(data);
-        const { date, time } = dosDateTime(fs.statSync(f.full).mtime);
-        const nameBuf = Buffer.from(f.relPath, 'utf8');
-
-        const lfh = Buffer.alloc(30);
-        lfh.writeUInt32LE(0x04034b50, 0);   // local file header 签名
-        lfh.writeUInt16LE(20, 4);           // version needed
-        lfh.writeUInt16LE(0, 6);            // flags
-        lfh.writeUInt16LE(method, 8);
-        lfh.writeUInt16LE(time, 10);
-        lfh.writeUInt16LE(date, 12);
-        lfh.writeUInt32LE(crc, 14);
-        lfh.writeUInt32LE(body.length, 18); // 压缩后大小
-        lfh.writeUInt32LE(data.length, 22); // 原始大小
-        lfh.writeUInt16LE(nameBuf.length, 26);
-        lfh.writeUInt16LE(0, 28);           // extra 长度
-        parts.push(lfh, nameBuf, body);
-
-        const cdh = Buffer.alloc(46);
-        cdh.writeUInt32LE(0x02014b50, 0);   // central directory 签名
-        cdh.writeUInt16LE(20, 4);           // version made by
-        cdh.writeUInt16LE(20, 6);           // version needed
-        cdh.writeUInt16LE(0, 8);
-        cdh.writeUInt16LE(method, 10);
-        cdh.writeUInt16LE(time, 12);
-        cdh.writeUInt16LE(date, 14);
-        cdh.writeUInt32LE(crc, 16);
-        cdh.writeUInt32LE(body.length, 20);
-        cdh.writeUInt32LE(data.length, 24);
-        cdh.writeUInt16LE(nameBuf.length, 28);
-        cdh.writeUInt16LE(0, 30);           // extra 长度
-        cdh.writeUInt16LE(0, 32);           // comment 长度
-        cdh.writeUInt16LE(0, 34);           // 起始盘号
-        cdh.writeUInt16LE(0, 36);           // 内部属性
-        cdh.writeUInt32LE(0, 38);           // 外部属性
-        cdh.writeUInt32LE(offset, 42);      // 本地文件头偏移
-        central.push(cdh, nameBuf);
-
-        offset += 30 + nameBuf.length + body.length;
-    }
-
-    const cdStart = offset;
-    let cdSize = 0;
-    for (const c of central) { cdSize += c.length; }
-
-    const eocd = Buffer.alloc(22);
-    eocd.writeUInt32LE(0x06054b50, 0);
-    eocd.writeUInt16LE(0, 4);
-    eocd.writeUInt16LE(0, 6);
-    eocd.writeUInt16LE(files.length, 8);
-    eocd.writeUInt16LE(files.length, 10);
-    eocd.writeUInt32LE(cdSize, 12);
-    eocd.writeUInt32LE(cdStart, 16);
-    eocd.writeUInt16LE(0, 20);
-
-    fs.writeFileSync(outPath, Buffer.concat([...parts, ...central, eocd]));
-    return files.length;
-}
+const { writeZip } = require('./zip');
 
 const fileCount = writeZip(STAGE, zipPath);
 

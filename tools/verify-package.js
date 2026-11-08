@@ -7,10 +7,10 @@
  * 这里改用 Node 标准库，零外部依赖、跨平台。
  *
  * 校验内容：
- *   1. dist/ 下有且只有一个 zip
+ *   1. 精确选择当前 manifest 版本的面板 ZIP（--setup 选择统一安装 ZIP）
  *   2. zip 是合法归档，且**所有条目都在同一个顶层目录下**
  *      （否则用户解压出来是一堆散文件，得手工建目录，很容易放错）
- *   3. 顶层目录名 == manifest 里的 ExtensionBundle@Id
+ *   3. 顶层目录名 == manifest 里的 ExtensionManifest@ExtensionBundleId
  *      （CEP 按目录名定位扩展，不一致会静默不加载）
  *   4. 装有必需文件
  *   5. 不该进包的东西确实不在（install/ 与 .debug）
@@ -41,7 +41,10 @@ if (!fs.existsSync(DIST)) {
     process.exit(1);
 }
 
-const zips = fs.readdirSync(DIST).filter(f => f.endsWith('.zip'));
+const setup = process.argv.includes('--setup');
+const expected = require('./manifest').parseManifest(fs.readFileSync(path.join(ROOT, 'cep-extension/CSXS/manifest.xml'), 'utf8'));
+const expectedName = setup ? `arknight-pr-setup-v${expected.version}-windows-x64.zip` : `${expected.bundleId}-v${expected.version}.zip`;
+const zips = fs.readdirSync(DIST).filter(f => f === expectedName);
 if (zips.length === 0) {
     fail('dist/ 下没有 zip');
     process.exit(1);
@@ -126,7 +129,8 @@ const topDir = [...tops][0] || '';
 //  4. 目录名 == manifest Id
 // ------------------------------------------------------------------
 
-const manifestRel = topDir + '/CSXS/manifest.xml';
+const panelRoot = topDir + (setup ? '/panel' : '');
+const manifestRel = panelRoot + '/CSXS/manifest.xml';
 const manifestEntry = listed.entries.find(e => e.replace(/\/$/, '') === manifestRel.replace(/\/$/, ''));
 if (!manifestEntry) {
     fail(`包里找不到 ${manifestRel}`);
@@ -134,8 +138,10 @@ if (!manifestEntry) {
 }
 
 // 解压出 manifest 内容（zip 用 deflate，Node 内置 zlib 可解）
-function readZipEntry(file, wantName) {
-    const buf = fs.readFileSync(file);
+const archiveBuffers = new Map();
+function readZipEntry(file, wantName, binary = false) {
+    if (!archiveBuffers.has(file)) archiveBuffers.set(file, fs.readFileSync(file));
+    const buf = archiveBuffers.get(file);
     const EOCD = 0x06054b50;
     let eocd = -1;
     for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
@@ -159,8 +165,11 @@ function readZipEntry(file, wantName) {
             const lExtraLen = buf.readUInt16LE(localOffset + 28);
             const dataStart = localOffset + 30 + lNameLen + lExtraLen;
             const raw = buf.slice(dataStart, dataStart + compSize);
-            if (method === 0) { return raw.toString('utf8'); }
-            if (method === 8) { return zlib.inflateRawSync(raw).toString('utf8'); }
+            if (method === 0) { return binary ? raw : raw.toString('utf8'); }
+            if (method === 8) {
+                const decoded = zlib.inflateRawSync(raw);
+                return binary ? decoded : decoded.toString('utf8');
+            }
             throw new Error(`不支持的压缩方式 ${method}`);
         }
         p += 46 + nameLen + extraLen + commentLen;
@@ -176,14 +185,19 @@ try {
     process.exit(1);
 }
 
-const idMatch = manifestText.match(/<ExtensionBundle\b[^>]*\bId\s*=\s*"([^"]+)"/);
-const verMatch = manifestText.match(/<ExtensionBundle\b[^>]*\bVersion\s*=\s*"([^"]+)"/);
-const bundleId = idMatch ? idMatch[1] : '';
-const version = verMatch ? verMatch[1] : '';
+let bundleId;
+let version;
+try {
+    ({ bundleId, version } = require('./manifest').parseManifest(manifestText));
+    pass('CEP ExtensionManifest 7.0 结构与 ExtensionList/DispatchInfoList ID 一致');
+} catch (e) {
+    fail(e.message);
+    process.exit(1);
+}
 
 if (!bundleId) {
-    fail('manifest 里读不到 ExtensionBundle@Id');
-} else if (topDir === bundleId) {
+    fail('manifest 里读不到 ExtensionManifest@ExtensionBundleId');
+} else if (topDir === (setup ? 'arknight-pr-setup' : bundleId)) {
     pass(`顶层目录名与 manifest Id 一致（${bundleId}）`);
 } else {
     fail(`顶层目录名(${topDir}) != manifest Id(${bundleId})\n` +
@@ -209,9 +223,27 @@ const entriesSet = new Set(listed.entries.map(e => e.replace(/\/+$/, '')));
 const REQUIRED = [
     'CSXS/manifest.xml', 'index.html', 'hostscript.jsx',
     'js/main.js', 'js/bridge.js', 'js/timeline.js', 'js/csinterface.js',
-    'css/style.css'
+    'css/style.css', 'LICENSE', 'js/preview.js', 'js/preview-bridge.js'
 ];
-const missing = REQUIRED.filter(r => !entriesSet.has(topDir + '/' + r));
+const missing = REQUIRED.filter(r => !entriesSet.has(panelRoot + '/' + r));
+if (setup) {
+    const requiredSetup = ['setup.bat', 'setup.ps1', 'runtime-lock.json', 'LICENSE', 'INSTALLATION.md', 'backend/pr_cli.py', 'backend/analyzer.py', 'backend/frame_types.py', 'backend/session_store.py', 'backend/LICENSE', 'backend/SOURCE_VERSION.json'];
+    for (const file of fs.readdirSync(path.join(ROOT, 'backend'))) {
+        if (file.endsWith('.py') && !file.startsWith('test_')) requiredSetup.push('backend/' + file);
+    }
+    for (const kind of ['pause', '1x', '2x', 'play']) {
+        for (const prefix of ['templates_', 'source_images_']) {
+            if (!listed.entries.some(e => e.startsWith(topDir + '/backend/' + prefix + kind + '/') && e.endsWith('.png'))) missing.push(prefix + kind);
+        }
+    }
+    missing.push(...requiredSetup.filter(r => !entriesSet.has(topDir + '/' + r)));
+    for (const file of ['setup.bat', 'setup.ps1', 'runtime-lock.json']) {
+        const packaged = readZipEntry(zipPath, topDir + '/' + file);
+        const source = fs.readFileSync(path.join(ROOT, 'cep-extension/install', file), 'utf8');
+        if (packaged !== source) fail('Setup file differs from source: ' + file);
+        else pass('Setup file matches source: ' + file);
+    }
+}
 if (missing.length === 0) {
     pass(`装有必需文件（${REQUIRED.length} 项）`);
 } else {
@@ -219,12 +251,57 @@ if (missing.length === 0) {
 }
 
 const FORBIDDEN = ['install', '.debug'];
-const present = FORBIDDEN.filter(f => entriesSet.has(topDir + '/' + f));
+const present = FORBIDDEN.filter(f => [...entriesSet].some(e => e === panelRoot + '/' + f || e.startsWith(panelRoot + '/' + f + '/')));
+if (listed.entries.some(e => e.includes('\\') || e.split('/').includes('..') || e.startsWith('/') || e.includes('__pycache__'))) fail('Unsafe or cached archive entry');
 if (present.length === 0) {
     pass('不含 install/ 与 .debug（安装器与调试端口不该发给用户）');
 } else {
     fail(`包里不应包含：${present.join(', ')}`);
 }
+
+// Verify actual bytes, including binary templates, rather than only file names.
+const expectedFiles = new Map();
+function includeTree(dir, archiveDir, skip) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (skip && skip(entry.name)) continue;
+        const source = path.join(dir, entry.name);
+        const target = archiveDir + '/' + entry.name;
+        if (entry.isDirectory()) includeTree(source, target, skip);
+        else expectedFiles.set(target, fs.readFileSync(source));
+    }
+}
+includeTree(path.join(ROOT, 'cep-extension'), panelRoot,
+    name => name === 'install' || name === '.debug' || name === '__pycache__' || name === '.git');
+expectedFiles.set(panelRoot + '/LICENSE', fs.readFileSync(path.join(ROOT, 'LICENSE')));
+if (setup) {
+    for (const name of fs.readdirSync(path.join(ROOT, 'backend'))) {
+        const source = path.join(ROOT, 'backend', name);
+        if (/^(templates_|source_images_)/.test(name) && fs.statSync(source).isDirectory()) {
+            includeTree(source, topDir + '/backend/' + name, n => n === '__pycache__');
+        } else if ((name.endsWith('.py') && !name.startsWith('test_')) || ['LICENSE', 'SOURCE_VERSION.json'].includes(name)) {
+            expectedFiles.set(topDir + '/backend/' + name, fs.readFileSync(source));
+        }
+    }
+    for (const name of ['setup.bat', 'setup.ps1', 'runtime-lock.json']) {
+        expectedFiles.set(topDir + '/' + name, fs.readFileSync(path.join(ROOT, 'cep-extension/install', name)));
+    }
+    expectedFiles.set(topDir + '/LICENSE', fs.readFileSync(path.join(ROOT, 'LICENSE')));
+    expectedFiles.set(topDir + '/INSTALLATION.md', Buffer.from(fs.readFileSync(path.join(ROOT, 'docs/installation-options.md'), 'utf8')
+        .replace('../cep-extension/install/runtime-lock.json', 'runtime-lock.json')));
+}
+let byteMatches = 0;
+for (const [name, source] of expectedFiles) {
+    try {
+        const actual = readZipEntry(zipPath, name, true);
+        if (!actual || !actual.equals(source)) fail('Archive content differs from source: ' + name);
+        else byteMatches++;
+    } catch (e) { fail('Cannot verify archive content: ' + name, e.message); }
+}
+for (const name of listed.entries) {
+    if (!name.endsWith('/') && !expectedFiles.has(name)) fail('Unexpected archive file: ' + name);
+}
+if (new Set(listed.entries).size !== listed.entries.length) fail('Duplicate archive entries');
+if (byteMatches === expectedFiles.size) pass(`全部 ${byteMatches} 个文件与源码逐字节一致`);
 
 // ------------------------------------------------------------------
 

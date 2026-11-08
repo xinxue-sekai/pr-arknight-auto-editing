@@ -17,21 +17,17 @@
 
 请先读这一节再决定要不要用。
 
-**已完成并验证的部分**
+当前版本 **0.2.0** 新增内置后端、统一 Windows 安装器及视频预览，仍处于 0.x。
+完整变更见 [发布说明](docs/releases/v0.2.0.md)。
 
-- Node 桥接层（进程管理、NDJSON 流式解析、取消与超时、错误码）—— 有行为测试覆盖
-- ExtendScript 宿主层与面板主控的全部语法校验、manifest 与 `.debug` 的 XML 校验
-- 安装脚本的语法与中文输出（已在真实的 Windows PowerShell 5.1 上验证；
-  扩展复制与配置写入在开发机上因目录权限未完整跑完）
+**已记录的验证（2026-11-08）**
 
-**真机验证状态（2026-11-08 更新）**
+- 自动测试覆盖桥接、后端会话、预览、主控、时间轴、宿主模拟 API 与安装事务。
+- Premiere Pro **25.3.0** 已记录环境检测、分析、时间轴、EDL 导出与旧轮885段序列生成；后续已确认旧项目重开、新面板加载、源帧0→1预览及保存按钮成功。
+- Windows 正式用户级 setup 安装及保留可信缓存后的重复复用已有记录；干净 Windows 虚拟机尚未验收。
+- 这些结果不代表新版全链路、逐段源点/音频精度、长期音画同步或识别准确率通过。0.2x 仍有过场假阳性，需人工复核；严格静止规则为默认关闭的实验选项。
 
-- 已在 Premiere Pro **25.3.0** 上实测环境检测、`checkCapabilities`、
-  `getHostInfo`、分析、时间轴显示与 EDL 导出。
-- 使用者已确认完成后续真机验证，项目状态更新为**已真机验证**；
-  此前关于 Premiere 落地链路和真实素材联调“尚未验证”的待办已关闭。
-- 本次确认未附具体素材、参数及逐项测试记录，因此不额外宣称所有素材、
-  编码格式或 Premiere 版本均已覆盖。
+原始测量与限制见 [改造验证](docs/validation-2026-11-08.md)，后续修复与真机结果见 [全面自检](docs/self-check-2026-11-08.md)。
 
 **仍需收集的兼容性反馈**
 
@@ -42,21 +38,21 @@
 
 ## 组成
 
-本仓库**只包含 CEP 插件本体**：
+本仓库包含 CEP 面板、Python 后端及统一安装工具：
 
 | 目录 | 内容 |
 |---|---|
 | [cep-extension/](cep-extension) | 面板 UI + Node 桥接 + ExtendScript 宿主脚本 + 安装脚本 |
+| [backend/](backend) | 固定来源的分析器、会话存储、预览服务和模板 |
 | [docs/](docs) | 架构说明：单位约定、通信协议、错误码、运行时约束 |
 
-插件本身**不做任何视频分析**。解析、模板匹配、分段、区间计算全部交给一个**外部的
-Python 分析器**，两者职责划分如下：
+面板通过 Node 子进程调用仓库内的 Python 后端，负责解析、模板匹配、分段与区间计算：
 
 ```
 面板（用户操作）
    │  ① Node 桥接：spawn 子进程，NDJSON 流式读进度
    ▼
-外部 Python 分析器  ──→  读视频、模板匹配、算出保留区间与变速标记
+内置 Python 后端    ──→  读视频、模板匹配、算出保留区间与变速标记
    │  ② 结果落成会话文件
    ▼
 面板（canvas 时间轴微调）
@@ -65,10 +61,7 @@ Python 分析器**，两者职责划分如下：
 Premiere Pro 时间轴
 ```
 
-> **分析器不在本仓库内。** 它是第三方项目 `arknight-auto-editing`（作者 liemark，
-> MIT 协议）。本插件只通过子进程接口调用它，不包含、也不分发其任何代码，
-> 使用者需要自行获取。插件的时间轴是用 canvas 自己重写的，没有复用分析器
-> 附带的 Tkinter 桌面界面。
+> backend 源自 `arknight-auto-editing`（liemark，MIT），本仓库包含并随 setup 分发固定快照及本地改进。来源见 [SOURCE_VERSION.json](backend/SOURCE_VERSION.json)，许可见 [backend/LICENSE](backend/LICENSE)。面板 ZIP/ZXP 不包含完整后端运行环境。
 
 ---
 
@@ -79,7 +72,8 @@ Premiere Pro 时间轴
 | Premiere Pro | 2021 (15.0) 及以上 | 开发目标版本为 **25.3.0**。走 CEP 而非 UXP，正是为了兼容 25.6 以下的版本 |
 | Python | **3.10+** | 分析器用了 dataclass、f-string 与类型标注 |
 | `numpy`、`opencv-python` | 必需 | 分析器的模板匹配与帧差计算依赖 |
-| **外部 Python 分析器** | 需自行获取 | **不在本仓库内**，见下 |
+| Python 后端 | 仓库内 `backend/` | 推荐 setup 自动配置；源码开发可手动指定 |
+| FFmpeg | 可选，自行安装 | FFmpeg 解码与不兼容视频播放代理使用；默认 OpenCV 分析不需要 |
 
 安装分析器依赖：
 
@@ -97,26 +91,30 @@ analyzer.py     ← 模板匹配 / 分段算法
 frame_types.py  ← 帧类型常量
 ```
 
-指定方式有三种，按优先级：
+推荐 setup 自动写入 `~/.arknight-pr/config.json` 的 `pythonPath` 和 `cliDir`。
+源码开发可在面板「环境设置」指定本仓库 `backend/` 与装好依赖的 Python。
+桥接优先使用配置，然后探测扩展旁/内部的 `backend` 和兼容旧目录，最后检查
+`ARKNIGHT_ANALYZER_DIR`。`install.bat` 只安装面板，完整环境请用 `setup.bat`。
 
-1. 面板「环境设置」里填写目录 —— 最直观
-2. `~/.arknight-pr/config.json` 的 `cliDir` 字段（安装脚本会自动写入它探测到的结果）
-3. 环境变量 `ARKNIGHT_ANALYZER_DIR`
-
-安装脚本还会顺手探测几个常见位置（扩展目录的上一级、`analyzer/` 子目录等），
-但它**不包含**分析器本身，只会报告探测结果。
-
-> 分析器的 `pyproject.toml` 里还列了 `pillow` 与 `imageio`，那是它自带 Tkinter 界面
-> 与视频导出功能的依赖。插件不导出视频，所以不装也能正常工作 —— 面板只会把它们
-> 标为「可选依赖未装」。
->
-> 另外注意：Windows 上如果装了多个 Python，`py -3` 挑到的那个未必装了 numpy。
+Windows 多 Python 环境请将依赖安装到面板实际选择的解释器；`py -3` 未必指向它。
 
 ---
 
 ## 安装
 
-在 `cep-extension\install\` 目录下**双击 `install.bat`**，或在终端里执行：
+### 完整安装：双击 setup.bat（推荐）
+
+1. 关闭 Premiere，将最新 `arknight-pr-setup-v<版本>-windows-x64.zip` 完整解压到一个新目录，避免误开之前解压的旧安装器。
+2. 打开其中的 `arknight-pr-setup` 文件夹，双击 **`setup.bat`**。
+3. 窗口会显示检测、复用、下载、验证和安装各阶段；出现“安装完成”后再启动 Premiere。
+
+已有 Python 的用户也使用此入口。安装器检测插件专用环境：健康组件复用，缺失或损坏组件才准备；完整性必须依据锁定 SHA256 的可信原始归档核对，不信任本地清单或仅 import 成功。缓存缺失时仍须下载归档用于核对；无可信归档且断网时停止。仅面板或 backend 内容更新不重新下载运行时。首次缺少缓存时需要联网，此包不是离线包。
+
+安装器准备独立 Python、NumPy/OpenCV、内置 backend 和模板，不修改系统 Python 或 PATH；健康检查通过后更新 `pythonPath`/`cliDir`，升级失败恢复旧配置与文件。位置、许可、备份恢复及验证范围见 [Windows 安装说明](docs/installation-options.md)。
+
+### 高级：仅安装面板
+
+仅当你已自行准备兼容分析器、Python 及依赖时，才使用源码目录 `cep-extension\install\` 下的 `install.bat`。它不是上述完整安装包的入口：
 
 ```powershell
 .\install.bat
@@ -132,14 +130,14 @@ frame_types.py  ← 帧类型常量
 
 复制采用「先整份复制到暂存的 `xxx.new`、成功后再替换」的方式：写入失败时**旧版本不会被破坏**。
 
-> **两种分发形态**：Release 里通常同时有 `.zip` 与 `.zxp`。zip 按上文手动放置
+> **面板分发形态**：除统一 setup 外，Release 还提供面板 `.zip` 与 `.zxp`。面板 zip 按上文手动放置
 > （需要开 `PlayerDebugMode`）；zxp 用任意 ZXP 安装器（ZXP Installer、
 > Anastasiy Extension Manager 等）双击安装，不用开调试模式，但因为是
 > **每次发布临时生成的自签名证书**，安装时会提示「发布者不受信任」。
 > 没有顺手的 ZXP 安装器就用 zip，两者内容一致。
 
 > **不要**把 `.\install.bat` 连同行尾的 `# 注释` 一起复制粘贴进 PowerShell。
-> PowerShell 不支持行内 `#` 注释，整个字符串会被当成参数，必然报错。
+> 复制时只选命令本身，避免混入文档标记；PowerShell 本身支持行内 `#` 注释。
 
 安装完成后**必须重启 Premiere Pro**（扩展列表只在启动时加载一次）。
 
@@ -162,6 +160,10 @@ frame_types.py  ← 帧类型常量
    - **导出 EDL** → **导入 EDL**：兼容性更好的兜底路径
 
 ---
+
+## 预览的范围
+
+预览支持源帧查看、内容区域校准及剪后跳切试听。分析前总帧数是估计值，分析完成后以结果为准。浏览器不支持的编码可生成 H.264/AAC 播放代理，需自行配置 FFmpeg；setup 不包含 FFmpeg。逐帧预览与浏览器连续播放是不同路径，跳切试听不保证帧精确剪接或长期音画同步，最终输出仍需在 Premiere 检查。
 
 ## 关于「变速」，有一句话必须说清楚
 
@@ -186,7 +188,7 @@ Premiere 的插件 API —— **ExtendScript 与 UXP 都一样** —— 没有�
 再用 `Project.createNewSequenceFromClips()` 一次性按顺序拼成新序列。
 好处是无须手算 record 位置、不需要先铺满再删除，序列的帧率与尺寸自动匹配源素材。
 
-**兜底路径：EDL**（慢一点，但几乎不会失败）
+**兜底路径：EDL**（仍需验证当前素材的导入与时间码）
 
 导出 CMX3600 EDL，再让 Premiere 导入。EDL 是行业标准交换格式，
 不依赖任何「可能不存在」的 API。当面板提示「createSubClip 支持不佳」时改走这条。
@@ -243,7 +245,7 @@ Premiere 的插件 API —— **ExtendScript 与 UXP 都一样** —— 没有�
 
 **「环境存在问题」，提示找不到分析器目录**
 
-说明没定位到 `pr_cli.py`。这个分析器是**外部项目、不在本仓库内**，见上文
+说明没定位到 `pr_cli.py`。使用 setup 修复环境，或指定仓库内 `backend/`，见上文
 [准备分析器](#准备分析器) —— 先按那三种方式之一把目录指定好。
 面板在没有分析器时仍能打开、能看日志，但「开始分析」无法工作。
 
@@ -285,10 +287,10 @@ Python 侧的诊断信息全部走 stderr，面板只在**出错时**回显最�
 避免 OpenCV 的逐帧告警刷屏。需要完整输出时，直接手动执行：
 
 ```bash
-python pr_cli.py analyze --video "<你的录像.mp4>" --session-out "%TEMP%\s.json"
+python backend/pr_cli.py analyze --video "<你的录像.mp4>" --session-out "%TEMP%\s.json"
 ```
 
-（`pr_cli.py` 启动时会把工作目录切到自己所在处，所以在任意目录执行都可以。）
+（从仓库根目录运行；其他目录请传 `backend/pr_cli.py` 的绝对路径。后端不改变调用者工作目录。）
 
 ---
 
@@ -303,15 +305,18 @@ python pr_cli.py analyze --video "<你的录像.mp4>" --session-out "%TEMP%\s.js
 ### 提交前请跑一遍检查
 
 ```bash
-node tools/check.js           # 语法 / manifest 一致性 / 编码 / 浏览器兼容
+node tools/check.js           # 语法 / manifest 结构与回归 / 编码 / 浏览器兼容
 node tools/test-bridge.js     # bridge.js 行为测试（真实子进程流）
+node tools/test-main.js       # 素材绑定、编辑版本与异步任务队列
+node tools/test-timeline.js   # 帧边界、可见范围绘制与重绘合并
+node tools/test-hostscript.js # 宿主拼装与部分失败保护（模拟 API）
 node tools/check-links.js     # 文档里的相对链接是否有效
 node tools/package.js         # 打包到 dist/（发布时才需要）
 node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 ```
 
-前两条与 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一份代码，
-本地过了 CI 基本就会过。检查项都是针对本项目踩过的坑：
+上述检查均已接入 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)），
+在 Ubuntu 与 Windows 上运行。宿主测试使用模拟 API，不替代 Premiere 真机回归。检查项都是针对本项目踩过的坑：
 
 | 检查 | 为什么必须要 |
 |---|---|
@@ -319,9 +324,9 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 | 面板代码不使用 `?.` / `??` | CEP 11（PR 2021）内嵌 **Chromium 74**，用了会让整个面板白屏 |
 | `install.ps1` 必须以 UTF-8 **BOM** 开头 | 缺 BOM 时 PowerShell 5.1 按 GBK 解析，中文乱码且可能直接语法报错 |
 | `install.bat` 必须是纯 ASCII | cmd.exe 对批处理源文件的非 ASCII 字节解码不可靠 |
-| manifest 的 `Id` 与 `install.ps1` 的 `$ExtId` 一致 | 不一致会把扩展装进 CEP 不认的目录，菜单里看不到 |
-| `manifest.xml` 标签配平 | 清单解析失败时扩展静默不加载，没有任何提示 |
-| bridge.js 行为测试 | NDJSON 流式解析是纯手写代码，跨 chunk、多字节拆分、取消/超时等 18 项边界已固化成测试 |
+| manifest 的 `ExtensionBundleId` 与 `install.ps1` 的 `$ExtId` 一致 | 不一致会把扩展装进 CEP 不认的目录，菜单里看不到 |
+| `manifest.xml` CEP 结构与标签配平（含 `test-manifest.js` 回归） | 必须使用 `ExtensionManifest Version="7.0"` 与匹配的 `ExtensionList` / `DispatchInfoList`；仅标签配平无法拦截 CEP 12 的 `Unsupported Manifest version ''` |
+| bridge.js 行为测试 | 覆盖跨 chunk、多字节拆分、取消/超时、并发隔离、配置失败与区域检测等行为；数量以测试输出为准 |
 | 文档相对链接有效 | 目录结构一动就容易留下死链 |
 
 ### 编辑器的注意事项
@@ -349,6 +354,7 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 ├── CONTRIBUTING.md              # 贡献指南
 ├── LICENSE                      # MIT（含 Third-party notices 一节）
 ├── README.md
+├── backend/                     # 内置分析器、模板、会话与预览服务
 ├── docs/
 │   ├── architecture.md          # 架构、单位约定、协议、错误码
 │   └── versioning.md            # 版本号规则与发布流程
@@ -376,8 +382,7 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
         └── enable-debug-mode.reg
 ```
 
-外部分析器不在本仓库内 —— 把它放在任意位置，然后在面板里指定该目录即可
-（见上文「准备分析器」）。
+内置后端位于 `backend/`；setup 分发并配置它，面板 ZIP/ZXP 用户需另行配置运行环境。
 
 架构细节、单位约定（ticks / 秒）、通信协议与错误码见 [docs/architecture.md](docs/architecture.md)。
 
@@ -389,10 +394,9 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 
 有两点需要特别说明：
 
-1. **本插件依赖、但不包含**第三方项目 `arknight-auto-editing`（作者 liemark，MIT 协议）。
-   该项目的代码不在本仓库内，也不由本仓库分发，使用前需自行获取。
-   本插件只通过 `pr_cli.py` 定义的那个子进程接口与之协作 ——
-   输入是命令行参数，输出是 stdout 上的 NDJSON。
+1. 本仓库包含并分发上游 `arknight-auto-editing`（liemark，MIT）的后端快照及本地改进。
+   来源和快照信息见 [backend/SOURCE_VERSION.json](backend/SOURCE_VERSION.json)，上游许可保留在
+   [backend/LICENSE](backend/LICENSE)。游戏截图模板的权利不因 MIT 代码许可而另行授予。
 
 2. [cep-extension/js/timeline.js](cep-extension/js/timeline.js) 是从该项目的
    `timeline_widget.py` **移植**而来（保持了色带语义与配色的一一对应，

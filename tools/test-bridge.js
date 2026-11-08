@@ -8,7 +8,7 @@
  *   · bridge.js 是 IIFE，加载时挂 window.ArknightBridge —— 测试在 require
  *     之前注入 global.window，模拟 CEP 的 mixed-context 环境。
  *   · runCli spawn 的是 state.python.exe，且把 state.cliPath 作为脚本参数。
- *     把一个「由 Node 执行的假 CLI」（命名 pr_cli.js —— Node 20.6+ 拒绝
+ *     把一个「由 Node 执行的假 CLI」（命名 pr_cli.cjs —— Node 20.6+ 拒绝
  *     执行 .py 后缀的主脚本）放进隔离的临时 HOME，就能用真实子进程流重现
  *     NDJSON 的全部边界：
  *     末行无换行、单行跨 chunk、UTF-8 多字节被拆开、超大 JSON 跨 chunk、
@@ -46,7 +46,7 @@ const B = require('../cep-extension/js/bridge.js');
 const bridge = global.window.ArknightBridge;
 
 // ------------------------------------------------------------------
-//  假 CLI：被 node 当脚本执行的 pr_cli.js（后缀必须是 Node 认识的）
+//  假 CLI：被 node 当脚本执行的 pr_cli.cjs（后缀必须是 Node 认识的）
 // ------------------------------------------------------------------
 
 const FAKE_CLI = `'use strict';
@@ -87,15 +87,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         process.stderr.write('more noise\\n');
         process.stdout.write(JSON.stringify({ type: 'result', ok: true, noise: true }) + '\\n');
     } else if (mode === 'clierr') {
-        process.stdout.write(JSON.stringify({ type: 'error', message: '模板加载失败', detail: 'stack here' }) + '\\n');
+        process.stdout.write(JSON.stringify({ type: 'error', code: 'MISSING_TEMPLATE', message: '模板加载失败', detail: 'stack here' }) + '\\n');
         process.exit(1);
     } else if (mode === 'noresult') {
         process.stderr.write('Traceback (most recent call last):\\n  boom\\n');
         process.exit(3);
+    } else if (mode === 'suggest-content-rect') {
+        process.stdout.write(JSON.stringify({ type: 'progress', args: process.argv.slice(2) }) + '\\n');
+        await sleep(100);
+        process.stdout.write(JSON.stringify({ type: 'result', suggestion: { rect: [10, 20, 300, 200], confidence: 0.9 } }) + '\\n');
+    } else if (mode === 'tree') {
+        const child = require('child_process').spawn(process.execPath,
+            ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
+            { stdio: 'inherit' });
+        process.on('SIGTERM', () => {});
+        process.stdout.write(JSON.stringify({ type: 'progress', pid: child.pid }) + '\\n');
+        setInterval(() => {}, 1000);
+    } else if (['analyze', 'ranges', 'export-edl'].includes(mode)) {
+        const files = {};
+        for (const flag of ['--params', '--session-params', '--overrides']) {
+            const i = process.argv.indexOf(flag);
+            if (i >= 0) files[flag] = process.argv[i + 1];
+        }
+        process.stdout.write(JSON.stringify({ type: 'progress', files }) + '\\n');
+        await sleep(100);
+        const values = {};
+        for (const flag in files) values[flag] = JSON.parse(require('fs').readFileSync(files[flag], 'utf8'));
+        process.stdout.write(JSON.stringify({ type: 'result', files, values }) + '\\n');
     } else if (mode === 'hang') {
         setInterval(() => {}, 1000); // 永不退出，等测试杀掉
     }
-})().catch(() => process.exit(9));
+})().catch(e => { console.error(e); process.exit(9); });
 `;
 
 // ------------------------------------------------------------------
@@ -122,7 +144,7 @@ async function runMode(mode, opts) {
 // ------------------------------------------------------------------
 
 test('CODE 常量完整导出', async () => {
-    for (const c of ['NO_PYTHON', 'NO_CLI', 'SPAWN_FAILED', 'CANCELLED', 'TIMEOUT', 'CLI_ERROR', 'NO_RESULT']) {
+    for (const c of ['NO_PYTHON', 'NO_CLI', 'SPAWN_FAILED', 'BUSY', 'CANCELLED', 'TIMEOUT', 'CLI_ERROR', 'NO_RESULT']) {
         assert.strictEqual(bridge.CODE[c], c, '缺少错误码 ' + c);
     }
 });
@@ -164,6 +186,21 @@ test('saveConfig / getConfig 持久化', async () => {
     assert.strictEqual(bridge.getConfig().cliDir, 'X:\\analyzer');
     assert.ok(bridge.fileExists(bridge.paths.CONFIG_PATH), 'config.json 应已写出');
     assert.ok(bridge.paths.CONFIG_PATH.startsWith(TMP), 'config 应写在隔离的家目录里');
+});
+
+test('saveConfig failure preserves persisted config and cached Python', async () => {
+    const previous = bridge.getConfig(), python = { exe: 'cached' };
+    bridge.getState().python = python;
+    const write = fs.writeFileSync;
+    fs.writeFileSync = function (file) {
+        if (file === bridge.paths.CONFIG_PATH) throw new Error('disk full');
+        return write.apply(this, arguments);
+    };
+    try {
+        assert.strictEqual(bridge.saveConfig({ pythonPath: 'not-saved' }), false);
+        assert.strictEqual(bridge.getConfig(), previous);
+        assert.strictEqual(bridge.getState().python, python);
+    } finally { fs.writeFileSync = write; }
 });
 
 test('loadConfig 兼容带 BOM 的 config.json（PS 5.1 的 install.ps1 会写出）', async () => {
@@ -228,7 +265,7 @@ test('stderr 噪声不影响结果且逐段转发 onLog', async () => {
 test('{"type":"error"} → CLI_ERROR，带 detail', async () => {
     await assert.rejects(
         bridge.runCli(['clierr']),
-        e => e.code === 'CLI_ERROR' && /模板加载失败/.test(e.message) && e.detail === 'stack here');
+        e => e.code === 'CLI_ERROR' && e.backendCode === 'MISSING_TEMPLATE' && /模板加载失败/.test(e.message) && e.detail === 'stack here');
 });
 
 test('退出但无 result → NO_RESULT，带 stderr 尾部', async () => {
@@ -257,6 +294,147 @@ test('超时 → TIMEOUT，且随后仍可正常调用', async () => {
     assert.strictEqual(result.value, 42, '超时后的新调用应正常');
 });
 
+test('取消后立即启动被 BUSY 拒绝，旧任务结束后可再启动', async () => {
+    const first = bridge.runCli(['hang']);
+    const rejected = assert.rejects(first, e => e.code === 'CANCELLED');
+    const child = bridge.getState().child;
+    bridge.cancel();
+    await assert.rejects(bridge.runCli(['ok']), e => e.code === 'BUSY');
+    assert.strictEqual(bridge.getState().child, child);
+    await rejected;
+    assert.strictEqual((await runMode('ok')).result.value, 42);
+});
+
+test('suggestContentRect：参数/回调透传、提取 suggestion、独占 BUSY 和取消', async () => {
+    const progress = [];
+    const video = path.join(TMP, '中文 素材.mp4');
+    const pending = bridge.suggestContentRect(video, { onProgress: msg => progress.push(msg) });
+    await assert.rejects(bridge.runCli(['ok']), e => e.code === 'BUSY');
+    await assert.rejects(bridge.suggestContentRect(video), e => e.code === 'BUSY');
+    assert.deepStrictEqual(await pending, { rect: [10, 20, 300, 200], confidence: 0.9 });
+    assert.deepStrictEqual(progress[0].args, ['suggest-content-rect', '--video', video]);
+    const cancelled = bridge.suggestContentRect(video);
+    bridge.cancel();
+    await assert.rejects(cancelled, e => e.code === 'CANCELLED');
+    await assert.rejects(bridge.suggestContentRect(video, { timeoutMs: 1 }), e => e.code === 'TIMEOUT');
+});
+
+test('所有业务入口拒绝并发，参数独立且成功/取消/失败后清理', async () => {
+    const sentinel = bridge.writePayload('params.json', { host: true });
+    const first = bridge.analyze('movie.mp4', { own: 1 });
+    for (const call of [() => bridge.probe('other'),
+        () => bridge.suggestContentRect('other'),
+        () => bridge.analyze('other', { own: 2 }),
+        () => bridge.recompute('session', { other: true }, {}),
+        () => bridge.exportEdl('session', 'out', '', [])]) {
+        await assert.rejects(call(), e => e.code === 'BUSY');
+    }
+    const a = await first;
+    assert.deepStrictEqual(a.values['--params'], { own: 1 });
+    assert.deepStrictEqual(bridge.readJsonFile(sentinel), { host: true });
+    const b = await bridge.recompute('session', { keep: [1] }, { own: 2 });
+    const c = await bridge.exportEdl('session', 'out', 'clip', [[1, 2]]);
+    assert.deepStrictEqual(b.values['--session-params'], { own: 2 });
+    assert.deepStrictEqual(c.values['--overrides'], { keep_ranges: [[1, 2]] });
+    assert.notStrictEqual(path.dirname(a.files['--params']), path.dirname(b.files['--overrides']));
+    for (const result of [a, b, c]) {
+        for (const file of Object.values(result.files)) assert.ok(!fs.existsSync(path.dirname(file)));
+    }
+    const cancelled = bridge.analyze('movie.mp4', {});
+    bridge.cancel();
+    await assert.rejects(cancelled, e => e.code === 'CANCELLED');
+    const circular = {}; circular.self = circular;
+    await assert.rejects(bridge.recompute('session', {}, circular), /circular/i);
+    assert.deepStrictEqual(fs.readdirSync(bridge.paths.PAYLOAD_DIR).filter(n => n.startsWith('task-')), []);
+});
+
+for (const reason of ['cancel', 'timeout']) {
+    test('真实进程树终止：' + reason, async () => {
+        let descendant;
+        let ready;
+        const started = new Promise(resolve => { ready = resolve; });
+        const p = bridge.runCli(['tree'], {
+            timeoutMs: reason === 'timeout' ? 1500 : 0,
+            onProgress: msg => { descendant = msg.pid; ready(); }
+        });
+        const outcome = p.then(value => ({ value }), error => ({ error }));
+        await Promise.race([started, outcome]);
+        assert.ok(descendant, 'CLI 应先报告后代 PID');
+        if (reason === 'cancel') bridge.cancel();
+        const stopped = await outcome;
+        assert.strictEqual(stopped.error && stopped.error.code, reason === 'cancel' ? 'CANCELLED' : 'TIMEOUT');
+        let alive = true;
+        for (let i = 0; i < 40; i++) {
+            try {
+                process.kill(descendant, 0);
+                // Linux 容器的 PID 1 可能延迟回收已死亡的孤儿。
+                if (process.platform === 'linux' && /\) Z /.test(fs.readFileSync('/proc/' + descendant + '/stat', 'utf8'))) alive = false;
+            } catch (e) { alive = false; }
+            if (!alive) break;
+            await sleep(50);
+        }
+        assert.strictEqual(alive, false, '后代进程必须终止');
+    });
+}
+
+test('模拟双平台：无 close 有限结束，迟到事件不会清空新任务或污染原因', async () => {
+    const vm = require('vm');
+    const { EventEmitter } = require('events');
+    const { PassThrough } = require('stream');
+    const source = fs.readFileSync(path.join(__dirname, '../cep-extension/js/bridge.js'), 'utf8');
+    for (const platform of ['win32', 'linux']) {
+        const children = [], kills = [], execs = [];
+        const context = {
+            window: {}, Buffer,
+            process: { platform, env: {}, kill: (pid, signal) => kills.push([pid, signal]) },
+            setTimeout: (fn, ms) => setTimeout(fn, ms >= 2000 ? 30 : ms), clearTimeout,
+            require: name => {
+                if (name !== 'child_process') return require(name);
+                return {
+                    spawn: (exe, args, opts) => {
+                        const child = new EventEmitter();
+                        child.pid = 100 + children.length;
+                        child.stdout = new PassThrough(); child.stderr = new PassThrough();
+                        child.stdin = new PassThrough(); child.unref = () => {};
+                        child.kill = signal => kills.push([child.pid, signal]);
+                        child.options = opts;
+                        children.push(child); return child;
+                    },
+                    execFile: (exe, args, opts, callback) => {
+                        execs.push({ exe, args, opts });
+                        callback(new Error('taskkill unavailable'));
+                    }
+                };
+            }
+        };
+        vm.runInNewContext(source, context);
+        const b = context.window.ArknightBridge;
+        Object.assign(b.getState(), { python: { exe: 'test', preArgs: [] }, cliPath: __filename, cliDir: __dirname });
+        let callbacks = 0;
+        const first = b.runCli([], { onProgress: () => callbacks++, onLog: () => callbacks++ });
+        b.cancel();
+        await assert.rejects(b.runCli([]), e => e.code === 'BUSY');
+        await assert.rejects(first, e => e.code === 'CANCELLED');
+        const next = b.runCli([], { timeoutMs: 10 });
+        const nextChild = b.getState().child;
+        children[0].emit('close', 0);
+        children[0].emit('error', new Error('late'));
+        children[0].stdout.emit('data', Buffer.from('{"type":"progress"}\n'));
+        children[0].stderr.emit('data', Buffer.from('late'));
+        assert.strictEqual(b.getState().child, nextChild);
+        assert.strictEqual(callbacks, 0);
+        await assert.rejects(next, e => e.code === 'TIMEOUT');
+        assert.strictEqual(b.getState().child, null);
+        assert.strictEqual(children[0].options.detached, platform !== 'win32');
+        if (platform === 'win32') {
+            assert.deepStrictEqual(Array.from(execs[0].args), ['/PID', '100', '/T', '/F']);
+            assert.ok(kills.some(k => k[0] === 100 && k[1] === 'SIGKILL'));
+        } else {
+            assert.deepStrictEqual(kills[0], [-100, 'SIGKILL']);
+        }
+    }
+});
+
 // ------------------------------------------------------------------
 //  前置校验（放在最后，因为要改 state）
 // ------------------------------------------------------------------
@@ -268,7 +446,7 @@ test('无 Python → NO_PYTHON', async () => {
 
 test('找不到 pr_cli.py → NO_CLI', async () => {
     bridge.getState().python = { exe: process.execPath, preArgs: [], version: 'test' };
-    bridge.getState().cliPath = path.join(TMP, 'missing', 'pr_cli.js');
+    bridge.getState().cliPath = path.join(TMP, 'missing', 'pr_cli.cjs');
     bridge.getState().cliDir = path.join(TMP, 'missing');
     await assert.rejects(bridge.runCli(['ok']), e => e.code === 'NO_CLI');
 });
@@ -278,9 +456,9 @@ test('找不到 pr_cli.py → NO_CLI', async () => {
 // ------------------------------------------------------------------
 
 function setup() {
-    fs.writeFileSync(path.join(TMP, 'pr_cli.js'), FAKE_CLI, 'utf8');
+    fs.writeFileSync(path.join(TMP, 'pr_cli.cjs'), FAKE_CLI, 'utf8');
     bridge.getState().python = { exe: process.execPath, preArgs: [], version: 'test' };
-    bridge.getState().cliPath = path.join(TMP, 'pr_cli.js');
+    bridge.getState().cliPath = path.join(TMP, 'pr_cli.cjs');
     bridge.getState().cliDir = TMP;
 }
 

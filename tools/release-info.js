@@ -14,12 +14,7 @@ const ROOT = path.resolve(__dirname, '..');
 const MANIFEST = path.join(ROOT, 'cep-extension', 'CSXS', 'manifest.xml');
 const DIST = path.join(ROOT, 'dist');
 const xml = fs.readFileSync(MANIFEST, 'utf8');
-const match = xml.match(/<ExtensionBundle\b[^>]*\bVersion\s*=\s*"([^"]+)"/);
-if (!match) {
-    console.error('无法从 manifest.xml 读取 ExtensionBundle@Version');
-    process.exit(1);
-}
-const version = match[1];
+const { version } = require('./manifest').parseManifest(xml);
 
 function checkTag(tag) {
     const expected = 'v' + version;
@@ -32,40 +27,26 @@ function checkTag(tag) {
 }
 
 function writeNotes(outPath) {
-    const zips = fs.readdirSync(DIST).filter(name => /\.zip$/i.test(name)).sort();
-    if (zips.length !== 1) {
-        console.error('dist 中应有且只有一个 zip，实际找到: ' + zips.join(', '));
-        process.exit(1);
+    const notesFile = path.join(ROOT, 'docs', 'releases', 'v' + version + '.md');
+    const expectedAssets = [
+        'arknight-pr-setup-v' + version + '-windows-x64.zip',
+        'com.arknight.autoediting-v' + version + '.zip'
+    ];
+    if (fs.existsSync(notesFile)) {
+        for (const name of expectedAssets) {
+            if (!fs.existsSync(path.join(DIST, name))) throw new Error('Missing release asset: ' + name);
+        }
+        const notes = fs.readFileSync(notesFile, 'utf8').replace(/\]\((\.\.\/[^)]+)\)/g, (match, target) => {
+            const resolved = path.resolve(path.dirname(notesFile), target);
+            const relative = path.relative(ROOT, resolved).split(path.sep).join('/');
+            if (relative.startsWith('../')) throw new Error('Release notes link escapes repository: ' + target);
+            return '](https://github.com/xinxue-sekai/pr-arknight-auto-editing/blob/v' + version + '/' + relative + ')';
+        });
+        fs.writeFileSync(outPath, notes, 'utf8');
+        process.stdout.write(notes);
+        return;
     }
-    const zip = zips[0];
-    const body = [
-        'CEP 扩展包。',
-        '',
-        '## 安装',
-        '',
-        '1. 下载并解压 `' + zip + '`，得到 `com.arknight.autoediting` 文件夹',
-        '2. 整个文件夹放进 `%APPDATA%\\Adobe\\CEP\\extensions\\`',
-        '   最终路径应为 `…\\Roaming\\Adobe\\CEP\\extensions\\com.arknight.autoediting\\CSXS\\manifest.xml`',
-        '3. 开启未签名扩展的调试模式：把 `PlayerDebugMode`（字符串 `1`）写入',
-        '   `HKCU\\Software\\Adobe\\CSXS.10`、`.11`、`.12`',
-        '4. 重启 Premiere Pro，然后打开 `窗口 → 扩展 → Arknight Auto Editing`',
-        '',
-        '## 还需要准备分析器',
-        '',
-        '本扩展**不含**视频分析能力。分析器是独立的第三方项目，',
-        '需要自行获取并在面板的「环境设置」里指定其目录。',
-        '详见仓库 README 的「准备分析器」一节。',
-        '',
-        '## 已知情况',
-        '',
-        '版本 `' + version + '`。项目已获使用者真机验证确认（2026-11-08）。',
-        '已记录的 Premiere 版本为 25.3.0；此前关于落地链路与真实素材联调待验证的说明已更新。',
-        '其他 Premiere 版本、素材格式及参数组合仍需分别验证，',
-        '遇到问题欢迎开 issue，附实际版本、`checkCapabilities` 输出与面板日志。',
-        ''
-    ].join('\n');
-    fs.writeFileSync(outPath, body, 'utf8');
-    process.stdout.write(body);
+    throw new Error('Missing versioned release notes: ' + notesFile);
 }
 
 const mode = process.argv[2];

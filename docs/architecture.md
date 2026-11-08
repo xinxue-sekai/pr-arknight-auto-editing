@@ -60,9 +60,9 @@ CEP 路线在功能上并没有吃亏。
 
 ### 为什么桥接层用 `child_process` 而不是常驻 HTTP 服务
 
-- 不占端口、不触发 Windows 防火墙弹窗
-- 进程生命周期跟随一次分析，崩溃不会留下僵尸服务
-- 不需要处理并发请求与会话隔离
+- 分析通过子进程 NDJSON 通信，不需要 HTTP 分析服务。
+- 预览使用独立的常驻 `backend/preview_server.py` 子进程，由 `preview-bridge.js` 管理请求、channel 与迟到结果隔离。
+- 会话存储另有跨进程锁和版本冲突检测，不能把单次分析进程等同于无需并发隔离。
 
 ---
 
@@ -174,7 +174,7 @@ TICKS_PER_SECOND = 254016000000
 JSX 侧统一用 `Arknight._ticks(n)` 转换：`String(Math.round(Number(n)))`。
 
 `mediaType` 参数也不直观 —— `1 = 视频`、`2 = 音频`、`4 = 全部`（**不是 3**）。
-本项目只处理视频轨，所以一律传 `1`。
+视频与音频校验需要分别处理，不应把视频轨通过视为音频精度通过。
 
 帧号 ↔ ticks 换算：
 
@@ -213,18 +213,19 @@ Windows 上即 `C:\Users\<你>\.arknight-pr\`。
 
 ### 分析器目录的定位顺序
 
-分析器是**外部项目**（见 README「准备分析器」），位置完全不固定，
+分析器随仓库 `backend/` 与 setup 分发，源码及高级安装的目录可能不同，
 因此 `bridge.js` 的 `resolveCliDir()` 按优先级依次探测，取第一个同时含
 `pr_cli.py` 与 `analyzer.py` 的目录：
 
 1. 配置里的 `cliDir`（面板「环境设置」写入的就是它）
-2. `<扩展目录>/../arknight-auto-editing-main` —— 两者平级存放时的常见布局
-3. `<扩展目录>/../analyzer`
-4. 扩展目录自身
-5. `<扩展目录>/analyzer`
-6. 环境变量 `ARKNIGHT_ANALYZER_DIR`
+2. `<扩展目录>/../backend`、`<扩展目录>/backend`
+3. `<扩展目录>/../arknight-auto-editing-main` —— 两者平级存放时的常见布局
+4. `<扩展目录>/../analyzer`
+5. 扩展目录自身
+6. `<扩展目录>/analyzer`
+7. 环境变量 `ARKNIGHT_ANALYZER_DIR`
 
-安装脚本 `install.ps1` 用一套等价的候选列表。
+统一 `setup.ps1` 安装 backend 后明确写入 `cliDir`；旧 `install.ps1` 仅提供兼容探测。
 
 > 这套多级回退是为了「分析器位置不可预知」这件事付的代价。
 > 如果你固定把分析器放在某个位置，直接用面板里的「环境设置」写死即可，
@@ -239,14 +240,14 @@ Windows 上即 `C:\Users\<你>\.arknight-pr\`。
 | 文件 | 内容 | 用途 |
 |---|---|---|
 | `<name>.json` | 段落结构、参数、统计 | 体积小，面板读取回显 |
-| `<name>.npz` | `states` / `diffs` 数组 | 体积大，仅 Python 侧使用 |
+| JSON 的 `arrays_file` 指向的版本化 `.npz` | 状态、差分及评分缓存 | 仅 Python 侧使用，不猜测同名文件 |
 
 分开存的意义：**面板调参重算时不需要重新解码视频**。
 `ranges` 子命令只读 `.npz` 里的数组就能重算掩码与保留区间，
 这是把原 Tkinter 版「内存里常驻 diffs」的设计搬到了磁盘上。
 
 会话文件名由视频路径派生（`basename` 净化 + 32 位路径哈希），
-因此**同一素材重复分析会覆盖同一份会话**，不会无限堆积。
+同一素材使用稳定会话入口；数组以版本化文件写入，JSON 提交引用，保留两代并清理。跨进程锁、冲突检测与显式迁移保护旧证据；自动结果与人工覆盖分离。
 
 ### session 主要字段
 
@@ -308,7 +309,7 @@ proj.createNewSequenceFromClips(序列名, subclips, targetBin)
 
 - 不需要手算每段的 record 位置
 - 序列的帧率、尺寸自动匹配源素材
-- 不需要删除任何东西，失败时项目里不留垃圾
+- 不修改原始素材；部分失败仍可能留下宿主项目项，需检查返回结果
 
 **子剪辑名必须全局唯一** —— `createSubClip` 遇到重名可能失败或产生歧义项。
 命名规则是 `素材名_时间戳_随机4位_序号`，随机后缀是必需的：
@@ -375,7 +376,7 @@ proj.createNewSequenceFromClips(序列名, subclips, targetBin)
 - 模板字符串 → 用字符串拼接
 - `Array.prototype.forEach` / `map` / `filter` → 用 `for` 循环
 - `Object.keys` / `Object.assign` / `Array.isArray`
-- `JSON` 对象是可用的（CC 版本内置）
+- 不依赖宿主自带 `JSON`；`hostscript.jsx` 在缺失时安装 ES3 兼容层
 
 另外 `catch (e)` 里的 `e` 必须实际用到或省略命名，不同引擎的容忍度不同，
 所以本项目大量使用 `catch (e2) { }` 这种带序号的写法。
@@ -389,7 +390,7 @@ proj.createNewSequenceFromClips(序列名, subclips, targetBin)
 
 只用 Node 12 与 17 都稳定支持的 API。已刻意避开的：
 
-- `fs.promises.rm`（14.14+）、`fs.rmSync`（14.14+）—— 本扩展不需要删除文件，故也不存在替代实现
+- `fs.promises.rm`（14.14+）、`fs.rmSync`（14.14+）—— 清理逻辑使用旧运行时兼容 API
 - `AbortController`（15+）→ 取消进程用 `child.kill()`
 - `fs.mkdirSync` 的 `recursive: true` 选项是 10.12+，可用
 
@@ -422,4 +423,6 @@ PR 的插件 API 没有修改片段速度的接口）。
 | 无法自动设置片段速度 | ExtendScript 与 UXP 都没有该 API，QE DOM 也没有 | 只能等 Adobe 补 API；目前靠橙色标记提示手动设置 |
 | 当前已记录的真机版本为 25.3.0 | 使用者已于 2026-11-08 确认真机验证；尚未记录其他版本的完整结果 | 欢迎反馈其他版本的 `checkCapabilities` 输出 |
 | `clipsInSequence` 可能读到 `-1` | `TrackItemCollection` 在不同版本上暴露 `numItems` 或 `length`，都没有时读不到 | 已做兼容，读不到时面板改用 `subclipsCreated` 显示 |
-| 素材与参数覆盖范围有限 | 已获使用者真机验证确认，但本次未附素材、阈值与性能明细 | 后续反馈请记录录屏条件、参数和处理耗时 |
+| 素材与参数覆盖范围有限 | 单素材性能与诊断帧不构成独立准确率验收，0.2x 存在过场假阳性 | 见[测量记录](validation-2026-11-08.md) |
+| 新版宿主仅部分验证 | 源点语义、音频精度与 overwrite 兜底未完成真机验收，返回 partial | 见[全面自检](self-check-2026-11-08.md) |
+| 浏览器剪后预览是跳切试听 | 不承诺帧精确剪接或长期音画同步；不兼容编码代理需可选 FFmpeg | 最终在 Premiere 检查 |

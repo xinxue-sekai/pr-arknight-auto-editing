@@ -31,15 +31,26 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
       - name: 设置 Node.js
         uses: actions/setup-node@v5
         with:
           node-version: '20'
 
-      - name: 跑一遍静态校验
-        # 发布前必须过检查，避免把有问题的代码发出去
-        run: node tools/check.js
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.2'
+
+      - name: FFmpeg 测试工具
+        run: choco install ffmpeg --no-progress -y
+
+      - name: 后端测试依赖
+        run: python -I -m pip install numpy==2.2.3 opencv-python-headless==4.11.0.86
+
+      - name: 全部检查、行为测试、隔离安装与双包校验
+        run: node tools/test-all.js
 
       - name: 校验 tag 与 manifest 版本一致
         run: node tools/release-info.js --check-tag "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
@@ -59,6 +70,8 @@ jobs:
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           files: |
             dist/*.zip
             dist/*.zxp

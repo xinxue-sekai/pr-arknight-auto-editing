@@ -55,6 +55,7 @@
         NO_PYTHON: 'NO_PYTHON',         // 没有可用的 Python 解释器
         NO_CLI: 'NO_CLI',               // 找不到 pr_cli.py
         SPAWN_FAILED: 'SPAWN_FAILED',   // 子进程起不来
+        BUSY: 'BUSY',                   // 前一任务仍在运行或清理
         CANCELLED: 'CANCELLED',         // 用户主动取消
         TIMEOUT: 'TIMEOUT',             // 超时被终止
         CLI_ERROR: 'CLI_ERROR',         // Python 返回 {"type":"error"}
@@ -69,10 +70,36 @@
         return e;
     }
 
-    // 同一时刻只有一个分析进程，用模块级变量记录它为什么被杀。
-    // 否则 close 回调只能看到「退出码非 0」，会把用户主动取消
-    // 误报成「Python 异常退出」。
-    let killReason = '';
+    // 清理完成前保留任务所有权；原因、定时器与进程句柄均归属于任务。
+    let activeTask = null;
+    const STOP_WAIT_MS = 2000;
+
+    function busyError() {
+        return fail(CODE.BUSY, '上一任务仍在运行或清理，请稍后重试');
+    }
+
+    // POSIX 使用独立进程组，Windows 使用 taskkill /T /F（无 shell）。
+    // 强制终止整个树，避免父进程先退出后无法再找到它的后代。
+    function killTree(child, done) {
+        if (!child.pid) { done(); return; }
+        if (process.platform === 'win32') {
+            try {
+                execFile(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
+                    ['/PID', String(child.pid), '/T', '/F'],
+                    { windowsHide: true, timeout: STOP_WAIT_MS }, (err) => {
+                        if (err) { try { child.kill('SIGKILL'); } catch (e) { } }
+                        done();
+                    });
+            } catch (e) {
+                try { child.kill('SIGKILL'); } catch (ignored) { }
+                done();
+            }
+        } else {
+            try { process.kill(-child.pid, 'SIGKILL'); }
+            catch (e) { try { child.kill('SIGKILL'); } catch (ignored) { } }
+            done();
+        }
+    }
 
     function ensureDirs() {
         [HOME_DIR, SESSION_DIR, PAYLOAD_DIR].forEach(d => {
@@ -84,6 +111,7 @@
         state.extDir = extDir || '';
         ensureDirs();
         state.config = loadConfig();
+        state.python = null;
         state.cliDir = resolveCliDir();
         state.cliPath = state.cliDir ? path.join(state.cliDir, 'pr_cli.py') : '';
         return state;
@@ -105,10 +133,12 @@
     }
 
     function saveConfig(patch) {
-        state.config = Object.assign({}, state.config, patch || {});
+        const next = Object.assign({}, state.config, patch || {});
         try {
             ensureDirs();
-            fs.writeFileSync(CONFIG_PATH, JSON.stringify(state.config, null, 2), 'utf8');
+            fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf8');
+            state.config = next;
+            if (patch && Object.prototype.hasOwnProperty.call(patch, 'pythonPath')) state.python = null;
             return true;
         } catch (e) {
             return false;
@@ -133,6 +163,8 @@
         const candidates = [];
         if (state.config.cliDir) candidates.push(state.config.cliDir);
         if (state.extDir) {
+            candidates.push(path.join(state.extDir, '..', 'backend'));
+            candidates.push(path.join(state.extDir, 'backend'));
             candidates.push(path.join(state.extDir, '..', 'arknight-auto-editing-main'));
             candidates.push(path.join(state.extDir, '..', 'analyzer'));
             candidates.push(state.extDir);
@@ -183,18 +215,18 @@
 
     /** 依次尝试配置值、py 启动器、python、python3，取第一个可用者。 */
     async function detectPython(force) {
-        if (state.python && !force) return state.python;
+        if (state.python && !force && (!state.config.pythonPath || state.python.exe === state.config.pythonPath)) return state.python;
 
         const candidates = [];
         if (state.config.pythonPath) {
             candidates.push({ exe: state.config.pythonPath, preArgs: [] });
         }
         // Windows 官方启动器，能自动挑选已安装的 3.x
-        if (process.platform === 'win32') {
-            candidates.push({ exe: 'py', preArgs: ['-3'] });
+        if (!state.config.pythonPath) {
+            if (process.platform === 'win32') candidates.push({ exe: 'py', preArgs: ['-3'] });
+            candidates.push({ exe: 'python', preArgs: [] });
+            candidates.push({ exe: 'python3', preArgs: [] });
         }
-        candidates.push({ exe: 'python', preArgs: [] });
-        candidates.push({ exe: 'python3', preArgs: [] });
 
         const tried = [];
         for (const c of candidates) {
@@ -224,11 +256,14 @@
         if (!state.python) return { ok: false, error: '未检测到 Python' };
         const py = state.python;
         return new Promise(resolve => {
-            // importlib.util 是子模块，必须显式 import；只写 `import importlib`
-            // 会 AttributeError: module 'importlib' has no attribute 'util'
-            const code = 'import importlib.util\n' +
+            // 真正导入才能发现 DLL/ABI 损坏，find_spec 只能说明文件存在。
+            const code = 'import importlib\n' +
                 'def miss(ms):\n' +
-                '    return [m for m in ms if importlib.util.find_spec(m) is None]\n' +
+                '    failed = []\n' +
+                '    for m in ms:\n' +
+                '        try: importlib.import_module(m)\n' +
+                '        except Exception: failed.append(m)\n' +
+                '    return failed\n' +
                 'print("MISSING:"+",".join(miss(["numpy","cv2"])))\n' +
                 'print("OPTIONAL_MISSING:"+",".join(miss(["PIL","imageio"])))\n';
             execFile(py.exe, py.preArgs.concat(['-c', code]),
@@ -265,6 +300,7 @@
     function runCli(args, opts) {
         opts = opts || {};
         return new Promise((resolve, reject) => {
+            if (activeTask) { reject(busyError()); return; }
             if (!state.python) {
                 reject(fail(CODE.NO_PYTHON, '未检测到可用的 Python，请先在设置里指定解释器路径'));
                 return;
@@ -279,30 +315,59 @@
             const full = py.preArgs.concat([state.cliPath], args);
             let child;
             try {
-                child = spawn(py.exe, full, { cwd: state.cliDir, windowsHide: true });
+                child = spawn(py.exe, full, {
+                    cwd: state.cliDir, windowsHide: true,
+                    detached: process.platform !== 'win32'
+                });
             } catch (e) {
                 reject(fail(CODE.SPAWN_FAILED, '无法启动 Python: ' + e.message));
                 return;
             }
+            const task = { child, reason: '', stop: null };
+            activeTask = task;
             state.child = child;
-            killReason = '';
 
             let settled = false;
-            let timer = null;
+            let timer = null, stopTimer = null;
+            let closed = false, treeDone = false;
             const finish = (fn, value) => {
                 if (settled) { return; }
                 settled = true;
                 if (timer) { clearTimeout(timer); }
-                state.child = null;
+                if (stopTimer) { clearTimeout(stopTimer); }
+                if (activeTask === task) {
+                    activeTask = null;
+                    if (state.child === child) state.child = null;
+                }
                 fn(value);
             };
 
             const timeoutMs = Number(opts.timeoutMs) || 0;
+            const finishStopped = () => {
+                finish(reject, task.reason === 'cancel'
+                    ? fail(CODE.CANCELLED, '分析已取消')
+                    : fail(CODE.TIMEOUT, '分析超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），已请求终止进程树'));
+            };
+            task.stop = reason => {
+                if (settled || task.reason) return;
+                task.reason = reason;
+                if (timer) clearTimeout(timer);
+                // close 可能永远不来（后代持有管道、运行时异常等）。
+                stopTimer = setTimeout(() => {
+                    child.stdout.destroy();
+                    child.stderr.destroy();
+                    if (child.stdin) child.stdin.destroy();
+                    child.unref();
+                    finishStopped();
+                }, STOP_WAIT_MS + 500);
+                killTree(child, () => {
+                    if (settled) return;
+                    treeDone = true;
+                    if (closed) finishStopped();
+                });
+            };
             if (timeoutMs > 0) {
-                timer = setTimeout(() => {
-                    killReason = 'timeout';
-                    try { child.kill(); } catch (e) { }
-                }, timeoutMs);
+                timer = setTimeout(() => task.stop('timeout'), timeoutMs);
             }
 
             const outDec = new StringDecoder('utf8');
@@ -322,7 +387,7 @@
 
             const handleLine = (line) => {
                 line = line.trim();
-                if (!line || line[0] !== '{') return;
+                if (settled || task.reason || !line || line[0] !== '{') return;
                 let msg;
                 try { msg = JSON.parse(line); } catch (e) { return; }
                 if (msg.type === 'progress') {
@@ -334,35 +399,40 @@
                 }
             };
 
-            child.stdout.on('data', d => { outBuf += outDec.write(d); drain(false); });
+            child.stdout.on('data', d => {
+                if (settled || task.reason) return;
+                outBuf += outDec.write(d); drain(false);
+            });
             child.stderr.on('data', d => {
+                if (settled || task.reason) return;
                 const s = errDec.write(d);
                 // 只保留尾部若干字符用于报错，避免长堆栈撑爆内存
                 errTail = (errTail + s).slice(-4000);
                 if (opts.onLog) opts.onLog(s);
             });
             child.on('error', e => {
+                if (task.reason || settled) return;
                 finish(reject, fail(CODE.SPAWN_FAILED, 'Python 进程启动失败: ' + e.message));
             });
             child.on('close', code => {
+                if (settled) return;
+                closed = true;
+                if (task.reason) {
+                    if (treeDone) finishStopped();
+                    return;
+                }
                 outBuf += outDec.end();
                 errTail += errDec.end();
                 drain(true);
 
-                // 被杀的情况优先判定：此时既没有 result 也没有 cliError，
-                // 若不单独处理就会被报成「Python 异常退出」。
-                if (killReason === 'cancel') {
-                    finish(reject, fail(CODE.CANCELLED, '分析已取消'));
-                    return;
-                }
-                if (killReason === 'timeout') {
-                    finish(reject, fail(CODE.TIMEOUT,
-                        '分析超时（超过 ' + Math.round(timeoutMs / 1000) + ' 秒），已终止 Python 进程'));
+                // 末行进度回调也可能调用 cancel。
+                if (task.reason) {
+                    if (treeDone) finishStopped();
                     return;
                 }
                 if (cliError) {
                     finish(reject, fail(CODE.CLI_ERROR, cliError.message || '分析失败',
-                        { detail: cliError.detail || '' }));
+                        { detail: cliError.detail || '', backendCode: cliError.code || '' }));
                     return;
                 }
                 if (!result) {
@@ -379,9 +449,8 @@
 
     /** 取消正在运行的分析。 */
     function cancel() {
-        if (state.child) {
-            killReason = 'cancel';
-            try { state.child.kill(); } catch (e) { }
+        if (activeTask) {
+            activeTask.stop('cancel');
             return true;
         }
         return false;
@@ -406,9 +475,9 @@
      *   1. 给 pr_cli.py 传大负载（绕过 Windows ~32KB 命令行长度上限）
      *   2. 给 hostscript.jsx 传负载（绕过 evalScript 的长度与转义限制）
      */
-    function writePayload(name, obj) {
+    function writePayload(name, obj, taskDir) {
         ensureDirs();
-        const p = path.join(PAYLOAD_DIR, name);
+        const p = path.join(taskDir || PAYLOAD_DIR, name);
         // Node 默认写 UTF-8 无 BOM，JSX 侧已做 BOM 兜底剥离
         fs.writeFileSync(p, JSON.stringify(obj), 'utf8');
         return p;
@@ -430,18 +499,44 @@
         return runCli(['probe', '--video', videoPath]);
     }
 
+    function suggestContentRect(videoPath, opts) {
+        return runCli(['suggest-content-rect', '--video', videoPath], opts || {})
+            .then(r => r.suggestion);
+    }
+
+    // 参数生命周期覆盖整个任务（包括终止等待），不与 JSX 的载荷共用文件。
+    function withTaskPayloads(run) {
+        if (activeTask) return Promise.reject(busyError());
+        let dir;
+        const cleanup = () => {
+            if (!dir) return;
+            try {
+                fs.readdirSync(dir).forEach(name => fs.unlinkSync(path.join(dir, name)));
+                fs.rmdirSync(dir);
+            } catch (e) { /* 文件被外部占用时保留，仅影响本任务 */ }
+        };
+        try {
+            ensureDirs();
+            dir = fs.mkdtempSync(path.join(PAYLOAD_DIR, 'task-'));
+            return Promise.resolve(run((name, obj) => writePayload(name, obj, dir))).then(
+                result => { cleanup(); return result; },
+                error => { cleanup(); throw error; });
+        } catch (e) {
+            cleanup();
+            return Promise.reject(e);
+        }
+    }
+
     function analyze(videoPath, params, opts) {
-        opts = opts || {};
-        const session = sessionPathFor(videoPath);
-        const paramsFile = writePayload('params.json', params || {});
-        return runCli([
-            'analyze',
-            '--video', videoPath,
-            '--session-out', session,
-            '--params', paramsFile
-        ], opts).then(r => {
-            r.sessionPath = session;
-            return r;
+        return withTaskPayloads(write => {
+            const session = sessionPathFor(videoPath);
+            return runCli([
+                'analyze', '--video', videoPath, '--session-out', session,
+                '--params', write('params.json', params || {})
+            ], opts || {}).then(r => {
+                r.sessionPath = session;
+                return r;
+            });
         });
     }
 
@@ -451,22 +546,26 @@
      * 真实录像序列化后可达数百 KB。
      */
     function recompute(sessionPath, overrides, params, opts) {
-        const ovFile = writePayload('overrides.json', overrides || {});
-        const args = ['ranges', '--session', sessionPath, '--overrides', ovFile];
-        if (params) args.push('--session-params', writePayload('params.json', params));
-        return runCli(args, opts || {}).then(r => {
-            r.sessionPath = sessionPath;
-            return r;
+        return withTaskPayloads(write => {
+            const args = ['ranges', '--session', sessionPath,
+                '--overrides', write('overrides.json', overrides || {})];
+            if (params) args.push('--session-params', write('params.json', params));
+            return runCli(args, opts || {}).then(r => {
+                r.sessionPath = sessionPath;
+                return r;
+            });
         });
     }
 
     function exportEdl(sessionPath, outPath, clipName, keepRanges) {
-        const args = ['export-edl', '--session', sessionPath, '--out', outPath];
-        if (clipName) args.push('--clip-name', clipName);
-        if (keepRanges) {
-            args.push('--overrides', writePayload('overrides.json', { keep_ranges: keepRanges }));
-        }
-        return runCli(args);
+        return withTaskPayloads(write => {
+            const args = ['export-edl', '--session', sessionPath, '--out', outPath];
+            if (clipName) args.push('--clip-name', clipName);
+            if (keepRanges) {
+                args.push('--overrides', write('overrides.json', { keep_ranges: keepRanges }));
+            }
+            return runCli(args);
+        });
     }
 
     /** EDL 默认输出路径：与源视频同目录，加 _autoedit 后缀。 */
@@ -487,6 +586,7 @@
         cancel,
         runCli,
         probe,
+        suggestContentRect,
         analyze,
         recompute,
         exportEdl,
@@ -499,6 +599,8 @@
         CODE,
         getState: () => state,
         getConfig: () => state.config,
+        getRuntimeConfig: () => ({ extDir: state.extDir, cliDir: resolveCliDir(),
+            pythonPath: state.config.pythonPath || '', backendDir: state.config.backendDir || state.config.cliDir || '' }),
         paths: { HOME_DIR, SESSION_DIR, PAYLOAD_DIR, CONFIG_PATH }
     };
 })();

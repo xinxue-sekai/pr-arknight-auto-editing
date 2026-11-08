@@ -61,6 +61,8 @@
 
             this.selectedPauseId = null;
             this.onSelect = null;     // (pauseId|null) => void
+            this.onSeek = null;
+            this.onEditStart = null;
             this.onChange = null;     // 用户改动掩码/手柄后触发，供上层重算
 
             this._drag = null;        // {mode:'pan'|'handle', ...}
@@ -99,7 +101,7 @@
                 this.zoom = 1;
                 this.scrollFrame = 0;
             }
-            this.draw();
+            this._requestDraw();
         }
 
         /** 按 id 取当前暂停段（重算后段对象会被替换，需重新查找）。 */
@@ -116,7 +118,7 @@
             this.canvas.height = Math.round(HEIGHT * dpr);
             this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             this.cssWidth = w;
-            this.draw();
+            this._requestDraw();
         }
 
         // ------------------------------------------------------------
@@ -145,7 +147,24 @@
         //  绘制
         // ------------------------------------------------------------
 
+        _requestDraw() {
+            if (this._pendingDraw) return;
+            if (typeof window.requestAnimationFrame !== 'function') {
+                this.draw();
+                return;
+            }
+            // 用令牌使直接 draw() 后尚未执行的回调失效，无需 cancelAnimationFrame。
+            const pending = {};
+            this._pendingDraw = pending;
+            window.requestAnimationFrame(() => {
+                if (this._pendingDraw !== pending) return;
+                this.draw();
+            });
+        }
+
+        // 保留公开 API 的同步语义；内部更新在同一动画帧合并。
         draw() {
+            this._pendingDraw = null;
             const ctx = this.ctx, w = this.cssWidth, h = HEIGHT;
             if (!ctx) return;
             ctx.clearRect(0, 0, w, h);
@@ -233,13 +252,21 @@
                     if (!mask || !mask.length) {
                         this._fillSpan(x1, x2, y1, y2, COL.keepAuto, w);
                     } else {
-                        let cur = mask[0], runStart = 0;
-                        for (let i = 1; i <= mask.length; i++) {
-                            if (i === mask.length || mask[i] !== cur) {
-                                const a = this.f2x(seg.start + runStart);
-                                const b = this.f2x(seg.start + i);
-                                this._fillSpan(a, b, y1, y2, this._maskColor(cur), w);
-                                if (i < mask.length) { cur = mask[i]; runStart = i; }
+                        // 只扫描与视口相交的帧，包含两端的部分可见帧。
+                        const first = Math.max(0, Math.floor(this.scrollFrame - seg.start));
+                        const end = Math.min(mask.length, seg.end - seg.start + 1,
+                            Math.ceil(this.scrollFrame + this.visibleFrames - seg.start));
+                        if (first < end) {
+                            let cur = mask[first], runStart = first;
+                            for (let i = first + 1; i <= end; i++) {
+                                const next = i < end ? mask[i] : null;
+                                if (i === end || next !== cur) {
+                                    const a = this.f2x(seg.start + runStart);
+                                    const b = this.f2x(seg.start + i);
+                                    this._fillSpan(a, b, y1, y2, this._maskColor(cur), w);
+                                    cur = next;
+                                    runStart = i;
+                                }
                             }
                         }
                     }
@@ -356,7 +383,7 @@
             this.zoom = Math.min(maxZoom, Math.max(1, this.zoom * factor));
             this.scrollFrame = anchor - x / this.pxPerFrame;
             this._clampScroll();
-            this.draw();
+            this._requestDraw();
         }
 
         _onDown(e) {
@@ -374,17 +401,25 @@
 
             const handle = this._hitHandle(x, y);
             if (handle) {
-                this._drag = { mode: 'handle', seg: handle.seg, side: handle.side };
+                if (this.onEditStart) this.onEditStart();
+                this.seek(handle.seg[handle.side]);
+                this._drag = {
+                    mode: 'handle', seg: handle.seg, side: handle.side,
+                    startFrame: this.x2f(x),
+                    boundary: handle.side === 'keep_in' ? handle.seg.keep_in : handle.seg.keep_out + 1
+                };
                 return;
             }
 
+            this.seek(Math.floor(this.x2f(x)));
+            this._drag = { mode: 'seek' };
             // 左键：选中暂停段（点在暂停带上才生效）
             if (y >= 15 && y <= HEIGHT - 25) {
-                const f = Math.round(this.x2f(x));
+                const f = Math.floor(this.x2f(x));
                 const seg = this._hitPause(f);
                 this.selectedPauseId = seg ? seg.id : null;
                 if (this.onSelect) this.onSelect(this.selectedPauseId, seg);
-                this.draw();
+                this._requestDraw();
             }
         }
 
@@ -394,21 +429,26 @@
             const dx = x - this._lastX;
             this._lastX = x;
 
-            if (this._drag.mode === 'pan') {
+            if (this._drag.mode === 'seek') {
+                this.seek(Math.floor(this.x2f(x)));
+            } else if (this._drag.mode === 'pan') {
                 this.scrollFrame -= dx / this.pxPerFrame;
                 this._clampScroll();
-                this.draw();
+                this._requestDraw();
             } else if (this._drag.mode === 'handle') {
-                const f = Math.max(0, Math.min(this.totalFrames - 1, Math.round(this.x2f(x))));
-                const seg = this._drag.seg;
-                if (this._drag.side === 'keep_in') {
-                    // 允许 keep_in > keep_out，语义为「整段都不要」
-                    seg.keep_in = Math.min(f, seg.end);
+                const drag = this._drag, seg = drag.seg;
+                // 坐标是帧间边界，keep_out 是包含式帧索引：最右边界为 end + 1。
+                // 相对按下位置计算，避免在手柄命中容差内按下后原地移动造成跳帧。
+                const boundary = drag.boundary + Math.round(this.x2f(x) - drag.startFrame);
+                if (drag.side === 'keep_in') {
+                    // 保留既有空片段语义（允许 keep_in > keep_out）。
+                    seg.keep_in = Math.max(seg.start, Math.min(boundary, seg.end));
                 } else {
-                    seg.keep_out = Math.max(f - 1, seg.start - 1);
+                    seg.keep_out = Math.max(seg.start - 1, Math.min(boundary - 1, seg.end));
                 }
+                this.seek(seg[drag.side]);
                 if (this.onChange) this.onChange('handle');
-                this.draw();
+                this._requestDraw();
             }
         }
 
@@ -428,10 +468,11 @@
             const { x, y } = this._local(e);
             if (y < 15 || y > HEIGHT - 25) return;
 
-            const f = Math.round(this.x2f(x));
+            const f = Math.floor(this.x2f(x));
             const seg = this._hitPause(f);
             if (!seg) return;
 
+            if (this.onEditStart) this.onEditStart();
             const local = f - seg.start;
             const mask = seg.local_del_mask;
 
@@ -457,25 +498,36 @@
             this.selectedPauseId = seg.id;
             if (this.onSelect) this.onSelect(seg.id, seg);
             if (this.onChange) this.onChange('mask');
-            this.draw();
+            this._requestDraw();
         }
 
         /** 面板按钮调用：批量设置某个/全部暂停段的模式。 */
         setPauseMode(pauseId, mode) {
-            const apply = seg => { seg.mode = mode; };
+            if (this.onEditStart) this.onEditStart();
+            const apply = seg => {
+                seg.mode = mode;
+                if (mode === 'auto' && seg.local_del_mask) {
+                    seg.local_del_mask = seg.local_del_mask.map(v => v === 2 ? 0 : (v === 3 ? 1 : v));
+                }
+            };
             if (pauseId === null || pauseId === undefined) {
                 this.pauseSegments.forEach(apply);
             } else {
                 const seg = this.pauseSegments.find(s => s.id === pauseId);
                 if (seg) apply(seg);
             }
-            if (this.onChange) this.onChange('mode');
-            this.draw();
+            if (this.onChange) this.onChange(mode === 'auto' ? 'auto' : 'mode');
+            this._requestDraw();
+        }
+
+        seek(frame) {
+            this.setPlayhead(Math.max(0, Math.min(this.totalFrames - 1, frame)));
+            if (this.onSeek) this.onSeek(this.currentFrame);
         }
 
         setPlayhead(frame) {
             this.currentFrame = frame || 0;
-            this.draw();
+            this._requestDraw();
         }
 
         /** 保证播放头在可视范围内（跟随播放）。 */
@@ -486,7 +538,7 @@
                 this.scrollFrame = Math.max(0, frame - this.visibleFrames / 2);
                 this._clampScroll();
             }
-            this.draw();
+            this._requestDraw();
         }
     }
 

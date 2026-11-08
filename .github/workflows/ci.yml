@@ -1,19 +1,5 @@
 name: CI
 
-# 本仓库是「源码即产物」的 CEP 扩展：没有编译、打包、转译步骤，
-# 因此 CI 不产出任何构建物，只做静态校验与行为测试 —— 而且全部在几秒内跑完。
-#
-# 检查项都是真实踩过的坑，不是泛泛的 lint：
-#   · CEP 11（PR 2021）内嵌 Chromium 74，一个 ?. 就能让整个面板白屏
-#   · install.ps1 缺 UTF-8 BOM 时，PowerShell 5.1 按 GBK 解析，中文乱码 + 语法错误
-#   · manifest 的 Id 与 install.ps1 的 $ExtId 不一致时，扩展被装进 CEP 不认的目录
-#
-# 复现本地检查：
-#   node tools/check.js          静态校验
-#   node tools/check-links.js    文档相对链接
-#   node tools/test-bridge.js    bridge.js 行为测试
-#   node tools/package.js        试打包（配合 verify-package.js）
-
 on:
   push:
     branches: ['**']
@@ -25,47 +11,29 @@ permissions:
 
 jobs:
   check:
-    name: 静态校验与测试
-    runs-on: ubuntu-latest
-
+    name: 全测试 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v5
-
-      - name: 设置 Node.js
-        uses: actions/setup-node@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
-
-      - name: 显示环境信息
-        run: |
-          node --version
-          echo "---"
-          echo "仓库内容："
-          git ls-files
-
-      - name: 运行检查
-        run: node tools/check.js
-
-      - name: bridge.js 行为测试
-        # 用真实子进程流覆盖 NDJSON 的全部边界：末行无换行、单行跨 chunk、
-        # UTF-8 多字节被拆开、超大 JSON、stderr 噪声、取消/超时/错误码。
-        # 测试自带隔离的临时 HOME，不碰真实 ~/.arknight-pr。
-        run: node tools/test-bridge.js
-
-      - name: 检查文档相对链接
-        # README / docs 里引用了不少相对路径，改名或删文件后很容易留下死链。
-        # 这一步只验证「被引用的本地文件确实存在」，不做完整 Markdown lint。
-        run: node tools/check-links.js
-
-      - name: 试打包
-        # package.js 里有一组「打包前校验」（必需文件齐备、目录名必须等于
-        # manifest 的 Id）。这里跑一次，保证发布时不会打出一个装不上的包。
-        # 产物不上传 —— 真正的发布由 tag 触发（见 release.yml）。
-        run: node tools/package.js
-
-      - name: 校验包结构
-        # 解压后目录名必须等于 ExtensionBundle@Id，否则 CEP 静默不加载。
-        # 用 Node 脚本而不是 shell 的 unzip —— ubuntu-latest 不预装 unzip，
-        # 依赖系统工具会让这一步在干净 runner 上直接失败。
-        run: node tools/verify-package.js
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.2'
+      - name: FFmpeg 测试工具 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: FFmpeg 测试工具 (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+      - name: 后端测试依赖
+        run: python -I -m pip install numpy==2.2.3 opencv-python-headless==4.11.0.86
+      - name: 静态检查、全部行为测试、后端测试与双包校验
+        # test-all discovers tools/test-*.js, including preview and isolated setup.
+        # Windows downloads the locked runtime and tests real install/rollback in temp.
+        run: node tools/test-all.js

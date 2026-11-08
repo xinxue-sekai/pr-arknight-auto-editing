@@ -1,0 +1,22 @@
+{
+  "source": "../arknight-auto-editing-main",
+  "git_commit": null,
+  "note": "Source snapshot has no Git metadata; version is SHA-256 of sorted relative-path/file-hash manifest. Local backend fixes follow snapshot.",
+  "snapshot_sha256": "95bc694e48f0542706fea46c513521a966aa324a43a21139f173554ce3041051",
+  "files": {
+    "analyzer.py": "cd01db01abb4a40cb61ab2761a3826cc1df7b3060f9016564123711017eaa1a9",
+    "frame_types.py": "53c4a5eb76a91b4ab2d2824d2fd0232d1009737bb0fae1cd48eee3125bc511ad",
+    "LICENSE": "0b54f5de01a43f18887fee5933aa3980ad40e9cdc2374e5f39b2f84d8bd6752b",
+    "pr_cli.py": "3f45db82cf8eaf30e5fe81bed83164700f0b40e96f18b9e0eb2b2a392563430a",
+    "source_images_1x/Screenshot_20251103-024931.png": "1c33c15e382c3f1b8236266a521b2b3df3511404b42b6c8f033bb994b577a93f",
+    "source_images_2x/Screenshot_20251103-024858.png": "593c3f24106b8e5871bda8d5a83bed2ef821312727b73ffc13aa449770ca6e51",
+    "source_images_pause/a.png": "9a236f9aaa8ba2b8db6b75e4d3b54be85650d6d54d10de8d97bfcc0429257814",
+    "source_images_play/Screenshot_20251103-024858.png": "593c3f24106b8e5871bda8d5a83bed2ef821312727b73ffc13aa449770ca6e51",
+    "templates_1x/Screenshot_20251103-024931.png": "0059e97099c5efc2d957e65c91e30ec567336660f949f6173fdf842baec82e06",
+    "templates_2x/Screenshot_20251103-024858.png": "8cf7a84ef279b12a6ad55145abe833e1664855d8cb3d6c28a0365b87fca998c7",
+    "templates_pause/1.png": "de8b6fc62315a626b1229e7d3e0b839041a94f47db4ae57ba6a1baf7861b1dd7",
+    "templates_pause/2.png": "262cd44e3588cfbaeee7975d209cbaf1b06bef556116a207543e49016bb1234e",
+    "templates_pause/3.png": "fb3e1045e72ee5fdc88cea79c7e25e350ff2728b4c33272254f41ea4c32dac3b",
+    "templates_play/Screenshot_20251103-024858.png": "2893694a2cce69a06e6ae697363ce3e61e124bd0e71ad403c1b4d365b64f8f69"
+  }
+}

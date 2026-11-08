@@ -31,14 +31,7 @@ const DIST = path.join(ROOT, 'dist');
 
 // 扩展 Id / 版本以 manifest 为唯一来源（与 package.js 保持同一套解析）
 const manifestXml = fs.readFileSync(path.join(ROOT, 'cep-extension', 'CSXS', 'manifest.xml'), 'utf8');
-const idMatch = manifestXml.match(/<ExtensionBundle\b[^>]*\bId\s*=\s*"([^"]+)"/);
-const verMatch = manifestXml.match(/<ExtensionBundle\b[^>]*\bVersion\s*=\s*"([^"]+)"/);
-if (!idMatch) {
-    console.error('无法从 manifest.xml 读出 ExtensionBundle@Id');
-    process.exit(1);
-}
-const EXT_ID = idMatch[1];
-const VERSION = verMatch ? verMatch[1] : '0.0.0';
+const { bundleId: EXT_ID, version: VERSION } = require('./manifest').parseManifest(manifestXml);
 
 const STAGE = path.join(DIST, EXT_ID);
 const ZXP_NAME = `${EXT_ID}-v${VERSION}.zxp`;
@@ -60,6 +53,14 @@ if (!fs.existsSync(path.join(STAGE, 'CSXS', 'manifest.xml'))) {
 }
 if (!fs.existsSync(path.join(STAGE, 'CSXS', 'manifest.xml'))) {
     console.error(`打包暂存目录不可用：${STAGE}`);
+    process.exit(1);
+}
+
+// Never sign a stale staging manifest left over from an earlier package.
+const stagedXml = fs.readFileSync(path.join(STAGE, 'CSXS', 'manifest.xml'), 'utf8');
+require('./manifest').parseManifest(stagedXml);
+if (stagedXml !== manifestXml) {
+    console.error('暂存 manifest 与源码不一致，请重新运行 node tools/package.js');
     process.exit(1);
 }
 

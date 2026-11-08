@@ -1,0 +1,22 @@
+{
+  "platform": "win_amd64",
+  "pythonVersion": "3.13.2",
+  "provenance": "CPython SHA256 calculated from python.org HTTPS archive on 2026-11-08; wheel SHA256 from versioned pypi.org JSON API, verified again on download. No floating versions or pip bootstrap.",
+  "python": {
+    "filename": "python-3.13.2-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.2/python-3.13.2-embed-amd64.zip",
+    "sha256": "1e803610b140cbf69dfa2ceaaeb39651bef75a239c381289e827c30862a27b93"
+  },
+  "wheels": [
+    {
+      "filename": "numpy-2.2.3-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/97/e7/7d55a86719d0de7a6a597949f3febefb1009435b79ba510ff32f05a8c1d7/numpy-2.2.3-cp313-cp313-win_amd64.whl",
+      "sha256": "5b732c8beef1d7bc2d9e476dbba20aaff6167bf205ad9aa8d30913859e82884b"
+    },
+    {
+      "filename": "opencv_python_headless-4.11.0.86-cp37-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/86/8a/69176a64335aed183529207ba8bc3d329c2999d852b4f3818027203f50e6/opencv_python_headless-4.11.0.86-cp37-abi3-win_amd64.whl",
+      "sha256": "6c304df9caa7a6a5710b91709dd4786bf20a74d57672b3c31f7033cc638174ca"
+    }
+  ]
+}

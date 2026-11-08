@@ -10,7 +10,7 @@
 - **Node.js 20+**（跑检查与测试；扩展本身不依赖你的 Node，CEP 自带运行时）
 - **Python 3.10+ 与 `numpy`/`opencv-python`**（只有调分析链路时才需要）
 - Windows 为主开发目标（安装脚本、CEP 注册表都是 Windows 语境），
-  但工具链脚本在 Linux/macOS 上同样可跑（CI 就是 ubuntu）
+  但工具链脚本在 Linux/macOS 上同样可跑（CI 覆盖 Ubuntu 与 Windows）
 
 **没有构建步骤。** CEP 扩展是「源码即产物」——改完源码重跑安装脚本、
 重启 Premiere 就能看到效果。
@@ -18,15 +18,22 @@
 ## 提交前请跑一遍检查
 
 ```bash
-node tools/check.js           # 语法 / manifest 一致性 / 编码 / 浏览器兼容
+node tools/check.js           # 语法 / manifest 结构与回归 / 编码 / 浏览器兼容
 node tools/test-bridge.js     # bridge.js 行为测试（真实子进程流）
+node tools/test-main.js       # 素材绑定、编辑版本与异步任务队列
+node tools/test-timeline.js   # 帧边界、可见范围绘制与重绘合并
+node tools/test-hostscript.js # 宿主拼装与部分失败保护（模拟 API）
 node tools/check-links.js     # 文档里的相对链接是否有效
 node tools/package.js         # 打包到 dist/（发布时才需要）
 node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
+node tools/package-setup.js   # 面板 + 统一 Windows 在线安装 ZIP
+node tools/verify-package.js --setup
+node tools/test-setup.js      # Windows 临时目录真实安装/升级/回滚；不碰真实用户环境
+node tools/test-all.js        # CI/Release 全测试入口，自动发现 tools/test-*.js 与 backend/test_*.py
 ```
 
 这些与 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一份代码，
-本地过了 CI 基本就会过。各项检查存在的理由（都是真实踩过的坑）：
+本地通过不保证其他平台或依赖环境也通过。各项检查存在的理由（都是真实踩过的坑）：
 
 | 检查 | 为什么必须要 |
 |---|---|
@@ -34,9 +41,9 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 | 面板代码不使用 `?.` / `??` | CEP 11（PR 2021）内嵌 **Chromium 74**，用了会让整个面板白屏 |
 | `install.ps1` 必须以 UTF-8 **BOM** 开头 | 缺 BOM 时 PowerShell 5.1 按 GBK 解析，中文乱码且可能直接语法报错 |
 | `install.bat` 必须是纯 ASCII | cmd.exe 对批处理源文件的非 ASCII 字节解码不可靠 |
-| manifest 的 `Id` 与 `install.ps1` 的 `$ExtId` 一致 | 不一致会把扩展装进 CEP 不认的目录，菜单里看不到 |
-| `manifest.xml` 标签配平 | 清单解析失败时扩展静默不加载，没有任何提示 |
-| bridge.js 行为测试 | NDJSON 流式解析是纯手写代码，18 项边界（跨 chunk、多字节拆分、取消/超时）固化成测试 |
+| manifest 的 `ExtensionBundleId` 与 `install.ps1` 的 `$ExtId` 一致 | 不一致会把扩展装进 CEP 不认的目录，菜单里看不到 |
+| `manifest.xml` CEP 结构与标签配平（含 `test-manifest.js` 回归） | 必须使用 `ExtensionManifest Version="7.0"` 与匹配的 `ExtensionList` / `DispatchInfoList`；仅标签配平无法拦截 CEP 12 的 `Unsupported Manifest version ''` |
+| bridge.js 行为测试 | 覆盖 NDJSON 跨 chunk、多字节拆分、取消/超时、并发隔离、配置失败与区域检测等行为；数量以测试输出为准 |
 | 文档相对链接有效 | 目录结构一动就容易留下死链 |
 
 ## 代码约束（违反任何一条都会在真实环境炸出来）
@@ -77,7 +84,7 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 - 面板「环境设置」区里 `checkCapabilities` 的完整输出
 - 面板日志区的内容（必要时含 stderr 尾部）
 
-项目已完成 Premiere 真机验证（2026-11-08 获使用者确认），当前已记录的
-测试版本为 25.3.0。涉及落地行为或版本兼容性的改动，请记录实际测试的
+Premiere 真机验证已记录部分功能，当前测试版本为 25.3.0；具体范围见
+[全面自检](docs/self-check-2026-11-08.md)。模拟 API 测试不能替代完整真机验收。涉及落地行为或版本兼容性的改动，请记录实际测试的
 Premiere 版本、素材条件、`checkCapabilities` 输出与面板日志；其他版本
 仍需分别验证。

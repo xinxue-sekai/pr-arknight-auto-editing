@@ -32,6 +32,10 @@ cep-extension/js/timeline.js is a port of timeline_widget.py from the
 
 That notice is reproduced here as required by the terms of the MIT License.
 
-Note that the "arknight-auto-editing" project itself is NOT included in this
-repository. This project only speaks to it through a subprocess interface;
-users must obtain that project separately to make this plugin functional.
+The backend/ directory includes a fixed, adapted subset of the
+"arknight-auto-editing" project. Its upstream license is retained in
+backend/LICENSE and source provenance is recorded in backend/SOURCE_VERSION.json.
+The unified setup distribution includes this backend; panel-only ZIP/ZXP
+packages require a separately configured compatible runtime and backend.
+Game screenshot assets retain their original rights; the software MIT license
+does not grant separate rights to game artwork.

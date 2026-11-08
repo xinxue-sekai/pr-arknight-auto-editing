@@ -25,6 +25,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExtSrc     = Split-Path -Parent $InstallDir
@@ -41,30 +42,34 @@ Write-Host ''
 
 # ---- 1. 定位分析器目录（pr_cli.py + analyzer.py 必须在同一处）----
 #
-# 分析器是外部项目，本仓库不含其代码，位置不固定，因此这里多猜几个常见位置。
+# 优先复用已配置分析器，也支持仓库 backend 及外部历史目录。此入口不安装 Python。
 # 全部落空不会中断安装，只是写不进 cliDir，需要用户稍后在面板里手动指定。
 $AnalyzerDir = $null
 $candidates = [System.Collections.Generic.List[string]]::new()
 
-if (Test-Path $CfgFile) {
+$saved = $null
+if (Test-Path -LiteralPath $CfgFile) {
     try {
-        $saved = Get-Content $CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($saved -and $saved.cliDir) { $candidates.Add($saved.cliDir) }
-    } catch { }
+        $configText = Get-Content -LiteralPath $CfgFile -Raw -Encoding UTF8
+        $saved = $configText | ConvertFrom-Json
+        if ($configText -notmatch '^\s*\{' -or $saved -isnot [PSCustomObject]) { throw 'Config must be a JSON object.' }
+    } catch { throw "配置文件损坏，保留原文件并停止安装：$($_.Exception.Message)" }
+    if ($saved.cliDir -is [string] -and -not [string]::IsNullOrWhiteSpace($saved.cliDir)) { $candidates.Add($saved.cliDir) }
 }
 if ($env:ARKNIGHT_ANALYZER_DIR) { $candidates.Add($env:ARKNIGHT_ANALYZER_DIR) }
 
 $RepoRoot = Split-Path -Parent $ExtSrc
+$candidates.Add((Join-Path $RepoRoot 'backend'))
 $candidates.Add((Join-Path $RepoRoot 'arknight-auto-editing-main'))
 $candidates.Add($ExtSrc)
 $candidates.Add((Join-Path $ExtSrc 'analyzer'))
 $candidates.Add($RepoRoot)
 
 foreach ($dir in $candidates) {
-    if (-not $dir) { continue }
-    if ((Test-Path (Join-Path $dir 'pr_cli.py')) -and
-        (Test-Path (Join-Path $dir 'analyzer.py'))) {
-        $AnalyzerDir = (Resolve-Path $dir).Path
+    if (-not $dir -or $dir -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -or $dir -match '["<>|?*\x00-\x1f]') { continue }
+    if ((Test-Path -LiteralPath (Join-Path $dir 'pr_cli.py')) -and
+        (Test-Path -LiteralPath (Join-Path $dir 'analyzer.py'))) {
+        $AnalyzerDir = (Resolve-Path -LiteralPath $dir).Path
         break
     }
 }
@@ -73,19 +78,19 @@ foreach ($dir in $candidates) {
 # 而且新用户通常需要先拿到面板，才知道该往哪里填分析器目录。
 if ($AnalyzerDir) {
     foreach ($need in 'pr_cli.py', 'analyzer.py', 'frame_types.py') {
-        if (-not (Test-Path (Join-Path $AnalyzerDir $need))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $AnalyzerDir $need))) {
             Write-Host ('[警告] 分析器目录里缺少 ' + $need + '，该目录可能不完整：' + $AnalyzerDir) -ForegroundColor Yellow
         }
     }
     Write-Host ('[OK] 分析器目录 : ' + $AnalyzerDir) -ForegroundColor Green
 
-    if (-not (Test-Path (Join-Path $AnalyzerDir 'templates_pause'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $AnalyzerDir 'templates_pause'))) {
         Write-Host '[警告] 未找到 templates_pause 目录，暂停识别将无法工作。' -ForegroundColor Yellow
     }
 } else {
     $candList = ($candidates | ForEach-Object { '         - ' + $_ }) -join "`n"
     Write-Host '[提示] 未找到 Python 分析器目录，跳过该项 —— 扩展仍会正常安装。' -ForegroundColor Yellow
-    Write-Host '       分析器是外部项目，不在本仓库内，需要另行获取。已尝试：' -ForegroundColor Yellow
+    Write-Host '       可使用统一 setup 安装完整环境，或手动配置仓库 backend。已尝试：' -ForegroundColor Yellow
     Write-Host $candList -ForegroundColor DarkGray
     Write-Host '       装好后在面板的「环境设置」里填写它的目录即可；' -ForegroundColor Yellow
     Write-Host '       也可以先设环境变量 ARKNIGHT_ANALYZER_DIR 再重跑本脚本。' -ForegroundColor Yellow
@@ -95,7 +100,7 @@ Write-Host '[OK] 扩展文件齐全' -ForegroundColor Green
 # ---- 2. 开启未签名扩展的调试模式 ----
 foreach ($v in 'CSXS.10', 'CSXS.11', 'CSXS.12') {
     $key = "HKCU:\Software\Adobe\$v"
-    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
     New-ItemProperty -Path $key -Name PlayerDebugMode -Value '1' `
                      -PropertyType String -Force | Out-Null
 }
@@ -110,22 +115,27 @@ function Install-ExtensionCopy {
     param([string]$DestDir)
 
     $parent = Split-Path -Parent $DestDir
-    if ($parent -and -not (Test-Path $parent)) {
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Force -Path $parent -ErrorAction Stop | Out-Null
     }
 
-    $staging = $DestDir + '.new'
+    $backupRoot = Join-Path (Split-Path -Parent $parent) 'arknight-install-backups'
+    New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+    $backup = Join-Path $backupRoot ([Guid]::NewGuid().ToString('N'))
+    $staging = Join-Path $backupRoot ('stage-' + [Guid]::NewGuid().ToString('N'))
+    $moved = $false
     try {
-        if (Test-Path $staging) { Remove-Item $staging -Recurse -Force -ErrorAction Stop }
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction Stop }
         # 这里复制「目录本身」而不是 "$ExtSrc\*"：后者在目标不存在时会触发
         # 「Container cannot be copied onto existing leaf item」。
-        Copy-Item -Path $ExtSrc -Destination $staging -Recurse -Force -ErrorAction Stop
-        if (Test-Path $DestDir) { Remove-Item $DestDir -Recurse -Force -ErrorAction Stop }
-        Move-Item -Path $staging -Destination $DestDir -ErrorAction Stop
+        Copy-Item -LiteralPath $ExtSrc -Destination $staging -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $DestDir) { Move-Item -LiteralPath $DestDir -Destination $backup -ErrorAction Stop; $moved = $true }
+        Move-Item -LiteralPath $staging -Destination $DestDir -ErrorAction Stop
     } catch {
+        if ($moved -and -not (Test-Path -LiteralPath $DestDir)) { Move-Item -LiteralPath $backup -Destination $DestDir -ErrorAction Stop }
         # 清掉暂存目录：目标位置要么是完整的旧版本，要么是完整的新版本，不留半个
-        if (Test-Path $staging) {
-            Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
         }
         throw
     }
@@ -158,11 +168,11 @@ function Test-PremiereAppDir {
     param([string]$Dir)
     if (-not $Dir) { return $false }
     try {
-        if (-not (Test-Path $Dir -PathType Container)) { return $false }
+        if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { return $false }
         # 必须真的像安装目录：有主程序，或有 CEP / Settings 子目录
-        return (Test-Path (Join-Path $Dir 'Adobe Premiere Pro.exe')) -or
-               (Test-Path (Join-Path $Dir 'CEP')) -or
-               (Test-Path (Join-Path $Dir 'Settings'))
+        return (Test-Path -LiteralPath (Join-Path $Dir 'Adobe Premiere Pro.exe')) -or
+               (Test-Path -LiteralPath (Join-Path $Dir 'CEP')) -or
+               (Test-Path -LiteralPath (Join-Path $Dir 'Settings'))
     } catch { return $false }
 }
 
@@ -238,7 +248,7 @@ function Get-PremiereInstallDirs {
     # ⓪ 显式指定优先，此时不再查注册表也不扫盘
     if ($PremiereDir) {
         if (Test-PremiereAppDir $PremiereDir) {
-            $out.Add((Resolve-Path $PremiereDir).Path)
+            $out.Add((Resolve-Path -LiteralPath $PremiereDir).Path)
         } else {
             Write-Host ('[警告] -PremiereDir 指向的目录不像 Premiere 安装目录: ' + $PremiereDir) -ForegroundColor Yellow
         }
@@ -254,16 +264,16 @@ function Get-PremiereInstallDirs {
 
         # 提示路径本身可能就是安装目录
         if (Test-PremiereAppDir $h) {
-            $full = (Resolve-Path $h).Path
+            $full = (Resolve-Path -LiteralPath $h).Path
             if (-not $out.Contains($full)) { $out.Add($full) }
             continue
         }
         # 也可能是它的上一级（卸载信息里的 InstallLocation 就是这种）
-        if (Test-Path $h -PathType Container) {
+        if (Test-Path -LiteralPath $h -PathType Container) {
             try {
                 foreach ($sub in [System.IO.Directory]::GetDirectories($h, 'Adobe Premiere Pro*')) {
                     if (Test-PremiereAppDir $sub) {
-                        $full = (Resolve-Path $sub).Path
+                        $full = (Resolve-Path -LiteralPath $sub).Path
                         if (-not $out.Contains($full)) { $out.Add($full) }
                     }
                 }
@@ -301,7 +311,7 @@ if ($premiereDirs.Count -eq 0) {
 }
 foreach ($appDir in $premiereDirs) {
     $cepExt = Join-Path $appDir 'CEP\extensions'
-    if (-not (Test-Path $cepExt)) {
+    if (-not (Test-Path -LiteralPath $cepExt)) {
         # 目录不存在时顺手建一个：CEP 会把安装目录下的该路径作为搜索路径
         try {
             New-Item -ItemType Directory -Force -Path $cepExt -ErrorAction Stop | Out-Null
@@ -326,11 +336,15 @@ foreach ($appDir in $premiereDirs) {
 if (-not $AnalyzerDir) {
     Write-Host '[提示] 未定位到分析器，config.json 未改动（保留你已有的设置）。' -ForegroundColor DarkGray
 } else {
-    if (-not (Test-Path $CfgDir)) { New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null }
+    if (-not (Test-Path -LiteralPath $CfgDir)) { New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null }
 
     $cfg = $null
-    if (Test-Path $CfgFile) {
-        try { $cfg = Get-Content $CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $cfg = $null }
+    if (Test-Path -LiteralPath $CfgFile) {
+        try {
+            $text = Get-Content -LiteralPath $CfgFile -Raw -Encoding UTF8
+            $cfg = $text | ConvertFrom-Json
+            if ($text -notmatch '^\s*\{' -or $cfg -isnot [PSCustomObject]) { throw 'Config must be a JSON object.' }
+        } catch { throw "配置文件损坏，保留原文件：$($_.Exception.Message)" }
     }
 
     if ($cfg -is [System.Management.Automation.PSCustomObject]) {
@@ -345,8 +359,11 @@ if (-not $AnalyzerDir) {
     # ConvertTo-Json 结果默认写 UTF-16 LE，面板端 fs.readFileSync('utf8') 读不了；
     # 而 Set-Content -Encoding UTF8 在 PS 5.1 里必带 BOM，JSON.parse 也不认
     # —— 所以用 .NET API 显式写不带 BOM 的 UTF-8（2026-11-07 真机踩过）
-    $json = $cfg | ConvertTo-Json -Depth 5
-    [System.IO.File]::WriteAllText($CfgFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $json = $cfg | ConvertTo-Json -Depth 50
+    $tempConfig = $CfgFile + '.new-' + [Guid]::NewGuid().ToString('N')
+    [System.IO.File]::WriteAllText($tempConfig, $json, (New-Object System.Text.UTF8Encoding($false)))
+    if (Test-Path -LiteralPath $CfgFile) { [System.IO.File]::Replace($tempConfig, $CfgFile, ($CfgFile + '.backup-' + [Guid]::NewGuid().ToString('N'))) }
+    else { [System.IO.File]::Move($tempConfig, $CfgFile) }
     Write-Host ('[OK] 已写入配置 ' + $CfgFile) -ForegroundColor Green
 }
 

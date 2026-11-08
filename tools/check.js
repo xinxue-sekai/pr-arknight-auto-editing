@@ -5,7 +5,7 @@
  * 这些检查全部是「踩过的坑」，不是泛泛的 lint：
  *   1. node --check      —— JS/JSX 语法。JSX 也要查，因为它同样是手写的、
  *                           且 ES3 报错在 Premiere 里极难定位。
- *   2. manifest 一致性   —— CEP 用「文件夹名 == ExtensionBundle@Id」来定位扩展，
+ *   2. manifest 一致性   —— CEP 用「文件夹名 == ExtensionManifest@ExtensionBundleId」来定位扩展，
  *                           不一致时扩展会静默不加载，菜单里根本不出现。
  *   3. install.ps1 BOM   —— 缺 BOM 时 Windows PowerShell 5.1 会按 GBK 解析，
  *                           中文乱码 + 语法错误。这个坑踩过好几次。
@@ -39,12 +39,10 @@ function section(title) { console.log('\n' + title); }
 
 section('[1/4] JS / JSX 语法');
 
-const jsFiles = [
-    'js/bridge.js',
-    'js/csinterface.js',
-    'js/main.js',
-    'js/timeline.js'
-];
+const jsFiles = fs.readdirSync(path.join(EXT, 'js'))
+    .filter(name => /\.js$/.test(name))
+    .sort()
+    .map(name => 'js/' + name);
 
 for (const rel of jsFiles) {
     const abs = path.join(EXT, rel);
@@ -79,13 +77,6 @@ section('[2/4] manifest.xml 一致性');
 
 const manifestPath = path.join(EXT, 'CSXS', 'manifest.xml');
 
-/** 极简 XML 取值：只够读属性，不值得为 CI 引依赖。 */
-function attrOf(xml, tag, attr) {
-    const re = new RegExp('<' + tag + '\\b[^>]*?\\b' + attr + '\\s*=\\s*"([^"]*)"', 'i');
-    const m = xml.match(re);
-    return m ? m[1] : '';
-}
-
 let manifestXml = '';
 try {
     manifestXml = fs.readFileSync(manifestPath, 'utf8');
@@ -95,53 +86,19 @@ try {
 }
 
 if (manifestXml) {
-    // 用栈做真正的配平校验。
-    // 不要用「数开标签 / 数闭标签」那种做法：`<Host ... />` 这类自闭合标签
-    // 会被粗略正则同时算进开标签，导致永远对不上（踩过）。
-    const xmlNoComment = manifestXml.replace(/<!--[\s\S]*?-->/g, '');
-    const tagRe = /<(\/?)([A-Za-z][\w:.-]*)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\/?)>/g;
-    const stack = [];
-    let m;
-    let balanced = true;
-    let detail = '';
-
-    while ((m = tagRe.exec(xmlNoComment)) !== null) {
-        const isClose = m[1] === '/';
-        const name = m[2];
-        const isSelf = m[4] === '/';
-
-        if (isSelf) { continue; }              // 自闭合，不入栈
-
-        if (isClose) {
-            const top = stack.pop();
-            if (top !== name) {
-                balanced = false;
-                detail = `</${name}> 与之对应的应为 </${top || '(无)'}>`;
-                break;
-            }
-        } else {
-            stack.push(name);
-        }
+    let bundleId = '';
+    let version = '';
+    try {
+        ({ bundleId, version } = require('./manifest').parseManifest(manifestXml));
+        pass('CEP ExtensionManifest 7.0 结构、标签配平及 ExtensionList/DispatchInfoList ID 一致');
+    } catch (e) {
+        fail('CEP manifest 结构不合法', e.message);
     }
-
-    if (balanced && stack.length > 0) {
-        balanced = false;
-        detail = '以下标签未闭合：' + stack.join(', ');
-    }
-
-    if (balanced) {
-        pass(`标签配平（栈式校验通过）`);
-    } else {
-        fail('标签配平失败', detail);
-    }
-
-    const bundleId = attrOf(manifestXml, 'ExtensionBundle', 'Id');
-    const version = attrOf(manifestXml, 'ExtensionBundle', 'Version');
-
-    if (bundleId) {
-        pass(`ExtensionBundle@Id = ${bundleId}`);
-    } else {
-        fail('读不到 ExtensionBundle@Id');
+    try {
+        execFileSync(process.execPath, [path.join(__dirname, 'test-manifest.js')], { stdio: 'pipe' });
+        pass('manifest schema 回归测试');
+    } catch (e) {
+        fail('manifest schema 回归测试', (e.stderr || e.message).toString());
     }
 
     // 注意：**不检查**「仓库里的文件夹名是否等于 Id」。
@@ -172,16 +129,7 @@ if (manifestXml) {
         fail(`版本号不是 x.y.z 格式：${version}`);
     }
 
-    // 每个 DispatchInfo/Extension@Id 都应当以 bundle Id 为前缀
-    const extIds = (manifestXml.match(/<Extension\s+Id="([^"]+)"/g) || [])
-        .map(s => s.replace(/.*Id="([^"]+)".*/, '$1'));
-    if (extIds.length === 0) {
-        fail('未找到 DispatchInfoList 里的 Extension@Id');
-    } else if (extIds.every(id => id.indexOf(bundleId + '.') === 0)) {
-        pass(`${extIds.length} 个 Extension@Id 均以 bundle Id 为前缀`);
-    } else {
-        fail('存在不以 bundle Id 为前缀的 Extension@Id', extIds.join(', '));
-    }
+
 }
 
 // ------------------------------------------------------------------
@@ -234,7 +182,7 @@ section('[4/4] Chromium 74 兼容（CEP 11）');
 // index.html 不能整份当 JS 扫：HTML 属性、URL、注释里的 `??` / `?.` 会误报，
 // 只提取其中 <script> 标签的内联代码。
 const panelSources = [];
-for (const rel of ['js/bridge.js', 'js/csinterface.js', 'js/main.js', 'js/timeline.js']) {
+for (const rel of jsFiles) {
     panelSources.push({ rel, text: () => fs.readFileSync(path.join(EXT, rel), 'utf8') });
 }
 panelSources.push({
