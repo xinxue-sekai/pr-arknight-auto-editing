@@ -9,6 +9,18 @@
 
 待后续变更。
 
+## [0.2.1] - 2026-11-24
+
+### Added
+
+- Windows x64 离线 setup：`arknight-pr-setup-offline-v<版本>-windows-x64.zip` 在在线 setup 相同内容外附带与 `setup.bat` 同级的 `runtime-deps/`，内含锁定的 CPython/NumPy/OpenCV 原始归档；安装不联网，缺件或 SHA256 不符时停止。离线包自 v0.2.1 起提供；历史 v0.2.0 只有在线包，其在线下载超时可手工准备锁定缓存（见安装说明）。
+- Release 自 v0.2.1 起要求离线 setup 附件，并在创建 Release 前校验 `runtime-deps/` 的文件名与锁定 SHA256。
+
+### Changed
+
+- bundle 与 panel 版本同步为 0.2.1；历史 v0.2.0 发布说明与记录不重写。
+- 安装说明区分当前 v0.2.1 的在线/离线 setup 与历史 v0.2.0 的无离线包状态，并修正手工缓存章节锚点。
+
 ## [0.2.0] - 2026-11-08
 
 ### Added

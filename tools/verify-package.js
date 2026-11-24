@@ -7,18 +7,23 @@
  * 这里改用 Node 标准库，零外部依赖、跨平台。
  *
  * 校验内容：
- *   1. 精确选择当前 manifest 版本的面板 ZIP（--setup 选择统一安装 ZIP）
+ *   1. 精确选择当前 manifest 版本的面板 ZIP（--setup 选择统一安装 ZIP，
+ *      --offline 选择离线 setup ZIP）
  *   2. zip 是合法归档，且**所有条目都在同一个顶层目录下**
  *      （否则用户解压出来是一堆散文件，得手工建目录，很容易放错）
  *   3. 顶层目录名 == manifest 里的 ExtensionManifest@ExtensionBundleId
  *      （CEP 按目录名定位扩展，不一致会静默不加载）
  *   4. 装有必需文件
  *   5. 不该进包的东西确实不在（install/ 与 .debug）
+ *   6. 离线 setup 的 runtime-deps/ 与 runtime-lock.json 的文件名、SHA256 一致
  *
  * 用法：先 node tools/package.js，再 node tools/verify-package.js
+ *       node tools/verify-package.js --setup
+ *       node tools/verify-package.js --offline
  */
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -41,9 +46,15 @@ if (!fs.existsSync(DIST)) {
     process.exit(1);
 }
 
-const setup = process.argv.includes('--setup');
+const offline = process.argv.includes('--offline');
+const setup = process.argv.includes('--setup') || offline;
+// 离线包入口由 package-offline.js 生成（转调 setup.ps1 -Offline），
+// 不是源码里的在线 setup.bat；两处内容检查都必须使用构建器的定义。
+const offlineBat = offline ? require('./package-offline').OFFLINE_BAT : null;
 const expected = require('./manifest').parseManifest(fs.readFileSync(path.join(ROOT, 'cep-extension/CSXS/manifest.xml'), 'utf8'));
-const expectedName = setup ? `arknight-pr-setup-v${expected.version}-windows-x64.zip` : `${expected.bundleId}-v${expected.version}.zip`;
+const expectedName = offline
+    ? `arknight-pr-setup-offline-v${expected.version}-windows-x64.zip`
+    : setup ? `arknight-pr-setup-v${expected.version}-windows-x64.zip` : `${expected.bundleId}-v${expected.version}.zip`;
 const zips = fs.readdirSync(DIST).filter(f => f === expectedName);
 if (zips.length === 0) {
     fail('dist/ 下没有 zip');
@@ -239,9 +250,53 @@ if (setup) {
     missing.push(...requiredSetup.filter(r => !entriesSet.has(topDir + '/' + r)));
     for (const file of ['setup.bat', 'setup.ps1', 'runtime-lock.json']) {
         const packaged = readZipEntry(zipPath, topDir + '/' + file);
-        const source = fs.readFileSync(path.join(ROOT, 'cep-extension/install', file), 'utf8');
-        if (packaged !== source) fail('Setup file differs from source: ' + file);
-        else pass('Setup file matches source: ' + file);
+        const source = offline && file === 'setup.bat'
+            ? offlineBat
+            : fs.readFileSync(path.join(ROOT, 'cep-extension/install', file), 'utf8');
+        if (packaged !== source) fail('Setup file differs from expected source: ' + file);
+        else pass('Setup file matches expected source: ' + file);
+    }
+}
+
+// 离线包必须原样携带 runtime-lock.json 锁定的原始归档，且位置在 setup.bat 旁。
+let offlineDeps = null;
+if (offline) {
+    const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'cep-extension/install/runtime-lock.json'), 'utf8'));
+    const items = [lock.python, ...lock.wheels];
+    const prefix = topDir + '/runtime-deps/';
+    offlineDeps = new Set(items.map(item => item.filename));
+    const found = new Set(listed.entries
+        .filter(e => e.startsWith(prefix) && !e.endsWith('/'))
+        .map(e => e.slice(prefix.length)));
+    let depsOk = true;
+    for (const item of items) {
+        if (!item || typeof item.filename !== 'string' || /[\\/]/.test(item.filename)) {
+            fail('runtime-lock.json 含非法 filename');
+            depsOk = false;
+            continue;
+        }
+        if (!found.has(item.filename)) {
+            fail('离线包缺少锁定依赖：' + item.filename);
+            depsOk = false;
+            continue;
+        }
+        let bytes;
+        try { bytes = readZipEntry(zipPath, prefix + item.filename, true); }
+        catch (e) { fail('无法读取离线依赖：' + item.filename, e.message); depsOk = false; continue; }
+        const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+        if (actual !== item.sha256) {
+            fail(`离线依赖 SHA256 不符：${item.filename}（期望 ${item.sha256}，实际 ${actual}）`);
+            depsOk = false;
+        }
+    }
+    for (const name of found) {
+        if (!offlineDeps.has(name)) {
+            fail('离线包含 runtime-lock.json 之外的依赖：' + name);
+            depsOk = false;
+        }
+    }
+    if (depsOk && found.size === items.length) {
+        pass(`runtime-deps/ 与 setup.bat 同根，${items.length} 个锁定依赖的 SHA256 全部匹配`);
     }
 }
 if (missing.length === 0) {
@@ -283,7 +338,9 @@ if (setup) {
         }
     }
     for (const name of ['setup.bat', 'setup.ps1', 'runtime-lock.json']) {
-        expectedFiles.set(topDir + '/' + name, fs.readFileSync(path.join(ROOT, 'cep-extension/install', name)));
+        expectedFiles.set(topDir + '/' + name, offline && name === 'setup.bat'
+            ? Buffer.from(offlineBat)
+            : fs.readFileSync(path.join(ROOT, 'cep-extension/install', name)));
     }
     expectedFiles.set(topDir + '/LICENSE', fs.readFileSync(path.join(ROOT, 'LICENSE')));
     expectedFiles.set(topDir + '/INSTALLATION.md', Buffer.from(fs.readFileSync(path.join(ROOT, 'docs/installation-options.md'), 'utf8')
@@ -299,10 +356,11 @@ for (const [name, source] of expectedFiles) {
     } catch (e) { fail('Cannot verify archive content: ' + name, e.message); }
 }
 for (const name of listed.entries) {
-    if (!name.endsWith('/') && !expectedFiles.has(name)) fail('Unexpected archive file: ' + name);
+    const isOfflineDep = offlineDeps && name.startsWith(topDir + '/runtime-deps/') && offlineDeps.has(name.slice((topDir + '/runtime-deps/').length));
+    if (!name.endsWith('/') && !expectedFiles.has(name) && !isOfflineDep) fail('Unexpected archive file: ' + name);
 }
 if (new Set(listed.entries).size !== listed.entries.length) fail('Duplicate archive entries');
-if (byteMatches === expectedFiles.size) pass(`全部 ${byteMatches} 个文件与源码逐字节一致`);
+if (byteMatches === expectedFiles.size) pass(`全部 ${byteMatches} 个文件与预期内容逐字节一致`);
 
 // ------------------------------------------------------------------
 

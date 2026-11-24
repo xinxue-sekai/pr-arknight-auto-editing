@@ -1,20 +1,39 @@
 # Windows 安装与发行包
 
-当前准备版本为 **0.2.0**，具体发行文件名与验证范围见 [v0.2.0 发布说明](releases/v0.2.0.md)。
+Windows x64 提供在线与离线两种统一 setup；安装位置、健康检查、升级与回滚行为相同，按网络情况选择：
 
-## 推荐：统一 setup ZIP
+- **在线 setup** `arknight-pr-setup-v<版本>-windows-x64.zip`：体积小，首次安装需访问 python.org 与 files.pythonhosted.org。
+- **离线 setup** `arknight-pr-setup-offline-v<版本>-windows-x64.zip`：额外携带锁定运行时归档，安装不联网。
+
+当前版本 **v0.2.1** 同时提供在线与离线 setup；历史 **v0.2.0 只有在线包**，没有离线附件，其下载超时可用下文的[手工缓存办法](#v020-下载超时的手工缓存办法)。具体发行文件名与验证范围见 [v0.2.1 发布说明](releases/v0.2.1.md)；历史 v0.2.0 发行文件见 [GitHub Releases v0.2.0](https://github.com/xinxue-sekai/pr-arknight-auto-editing/releases/tag/v0.2.0)。
+
+## 在线 setup（网络正常）
 
 下载 Release 的 `arknight-pr-setup-v<版本>-windows-x64.zip`，完整解压到任意目录，关闭 Premiere，再双击 `setup.bat`。无需管理员权限或预装 Python；首次安装需要连接 python.org 与 files.pythonhosted.org。安装器不会重启 Premiere，完成后由用户重新打开。
 
-setup 包包含面板、仓库内固定 backend 快照及四类模板/源截图、LICENSE、来源记录与运行时锁文件。它是在线安装包，不是离线包。仅需更新面板、且已自行配置 Python 与后端的高级用户，可使用源码仓库中的 `cep-extension/install/install.bat`。Release 的 `com.arknight.autoediting-v<版本>.zip` 仅含面板，需要手工复制到 CEP 扩展目录；其中不含 `install` 脚本。setup ZIP 内也没有这个旧入口。面板 ZIP 与 ZXP 都不含完整运行环境。
+## 离线 setup（网络慢、被阻断或下载超时）
+
+下载 Release 的 `arknight-pr-setup-offline-v<版本>-windows-x64.zip`，完整解压到任意目录，关闭 Premiere，再双击 `setup.bat`。包根目录与在线版相同，多出一个与 `setup.bat` 同级的 `runtime-deps/`，其中是 `runtime-lock.json` 列出的 CPython、NumPy 与 OpenCV 原始归档。安装器只使用包内归档或已校验的本地缓存，并禁止联网；缺件、损坏或 SHA256 不符时报告具体文件名后停止，不会回退在线下载。请完整解压整个包，不要只把 `runtime-deps/` 拷到在线包旁边。
+
+两种 setup 都包含面板、仓库内固定 backend 快照及四类模板/源截图、LICENSE、来源记录与运行时锁文件。仅需更新面板、且已自行配置 Python 与后端的高级用户，可使用源码仓库中的 `cep-extension/install/install.bat`。Release 的 `com.arknight.autoediting-v<版本>.zip` 仅含面板，需要手工复制到 CEP 扩展目录；其中不含 `install` 脚本。setup ZIP 内也没有这个旧入口。面板 ZIP 与 ZXP 都不含完整运行环境。
 
 统一 setup 仅安装用户级 CEP 副本；若 Premiere 安装目录中已有同 ID 的旧扩展，需自行移除旧副本或使用简单安装器的 `-PremiereDir` 流程处理。不要让多个版本遮蔽用户级扩展。
+
+## v0.2.0 下载超时的手工缓存办法
+
+v0.2.0 没有离线包。若 CPython、NumPy 或 OpenCV 在安装器 15 分钟总限时内未下载完：
+
+1. 按解压目录 `runtime-lock.json` 中 `python` 与 `wheels` 的 `filename`、`url` 手工下载三个文件。
+2. 对每个文件运行 `Get-FileHash -Algorithm SHA256 <文件>`，与同一份 `runtime-lock.json` 的 `sha256` 逐项比对；不一致就不要使用。
+3. 将三个文件放入同一个空目录，双击 `setup.bat -DownloadCache "<该目录>"`；也可以放进 `%LOCALAPPDATA%\ArknightPR\cache` 后正常双击 `setup.bat`。
+
+安装器仍会按锁定 SHA256 校验，不会信任未校验文件；缓存有效时后续安装可离线复用。保留该缓存，不要删除。
 
 ## 固定运行时与许可
 
 Windows x64 使用 CPython **3.13.2 embeddable**、NumPy **2.2.3**、opencv-python-headless **4.11.0.86**。只使用 OpenCV 视频解码和模板分析，无 Tkinter、Pillow、imageio、pip 或独立 FFmpeg。外部 FFmpeg 解码模式和不兼容视频的浏览器预览代理仍需用户自行安装并配置 FFmpeg；setup 不携带该组件，不应将 FFmpeg 路径设为默认必需后端。默认 OpenCV 分析可用，FFmpeg 路径的性能收益不代表仅安装此 setup 就能获得。
 
-[运行时清单](../cep-extension/install/runtime-lock.json)记录精确 URL、wheel ABI 和 SHA256。CPython 哈希于 2026-11-08 从 python.org HTTPS 实际下载计算；wheel 哈希来自对应版本 PyPI JSON API。安装时每个文件下载到独立空目录，先核对 SHA256，再解压。不会追踪浮动 latest/main。下载目录与脚本分开；执行 Python 使用 `-I`，`python313._pth` 仅允许标准库、独立 site-packages 和本版本 backend，不启用用户 site 或 cwd 搜索。
+[运行时清单](../cep-extension/install/runtime-lock.json)记录精确 URL、wheel ABI 和 SHA256。CPython 哈希于 2026-11-08 从 python.org HTTPS 实际下载计算；wheel 哈希来自对应版本 PyPI JSON API。在线 setup 把每个文件下载到独立空目录；离线 setup 从 `runtime-deps/` 读取同一组文件。两者都先核对 SHA256，再解压。不会追踪浮动 latest/main。下载目录与脚本分开；执行 Python 使用 `-I`，`python313._pth` 仅允许标准库、独立 site-packages 和本版本 backend，不启用用户 site 或 cwd 搜索。
 
 CPython 的 LICENSE、wheel 的 dist-info 及其 LICENSE/第三方声明随完整解压保留。setup 与面板 ZIP 均包含项目 LICENSE，backend 保留其 LICENSE 和 SOURCE_VERSION.json。游戏截图模板的来源与使用条件以 backend 来源记录为准；MIT 代码许可不代表另行授予游戏图像权利。
 
@@ -41,15 +60,17 @@ CPython 的 LICENSE、wheel 的 dist-info 及其 LICENSE/第三方声明随完�
 ## 开发和验证
 
 ```bash
-node tools/package-setup.js          # 生成面板 ZIP 与 setup ZIP，互不删除
-node tools/verify-package.js         # 校验当前版本面板包
-node tools/verify-package.js --setup # 校验当前版本 setup 包
-node tools/test-setup.js             # Windows 隔离目录内真实安装/升级/失败回滚
-node tools/test-all.js               # 全部 JS、后端测试与双包校验
+node tools/package-setup.js             # 生成面板 ZIP 与在线 setup ZIP，互不删除
+node tools/package.js --offline         # 生成离线 setup ZIP（同时保留现有产物）
+node tools/verify-package.js            # 校验当前版本面板包
+node tools/verify-package.js --setup    # 校验当前版本在线 setup 包
+node tools/verify-package.js --offline  # 校验离线 setup 及 runtime-deps 锁定哈希
+node tools/test-setup.js                # Windows 隔离目录内真实安装/升级/失败回滚
+node tools/test-all.js                  # 全部 JS、后端测试与双包校验
 ```
 
 `test-all` 的后端测试需要测试用 Python 已安装上述 NumPy/OpenCV，预览代理测试另需 PATH 中有 FFmpeg/ffprobe；可用 `PYTHON` 环境变量指定后端测试解释器。CI 安装 FFmpeg 仅用于测试，不将其加入 setup。Windows 安装测试下载真实运行时，在临时目录测试中文/空格路径、已有配置保留、两个切换点的回滚、升级保留旧环境及哈希拒绝；不改真实用户目录或注册表。非 Windows 仅验证运行时清单，明确跳过 Windows 安装测试。
 
 可在 PowerShell 中手工指定 `setup.ps1 -SandboxRoot <隔离目录>`；该模式所有安装目标都位于指定目录且不修改注册表。`-DownloadCache <目录>` 可复用与锁文件同名的下载文件，仍强制校验 SHA256。`-TestFailure AfterPanel|AfterConfig` 和 `-TestNoNetwork`（禁止安装器网络请求）仅允许搭配隔离模式。自动测试覆盖离线重复执行、无新增版本目录、同版本面板/后端独立更新、单依赖修复、坏缓存恢复、下载失败与事务回滚，还用本地 HTTP 服务验证延迟响应头、已知/未知总长的真实分块下载进度及超时。
 
-CI 在 Ubuntu/Windows 跑同一个全测试入口；Release 检出明确的目标 tag，并在全测试成功后打包发布。当前尚未在无 Python 的干净 Windows 虚拟机完成端到端验收，不能把开发机隔离测试等同于干净机证明。正式验收仍应覆盖无 Python/无开发工具环境、系统 DLL 条件、Premiere 加载、短视频分析、重算、EDL 和取消。
+CI 在 Ubuntu/Windows 跑同一个全测试入口；Release 检出明确的目标 tag，在全测试成功后生成面板、在线/离线 setup 与 zxp，并校验预期附件及离线 `runtime-deps/` 的锁定 SHA256 后才创建 Release。当前尚未在无 Python 的干净 Windows 虚拟机完成端到端验收，离线包部署体验也在待验收项中，不能把开发机隔离测试等同于干净机证明。正式验收仍应覆盖无 Python/无开发工具环境、系统 DLL 条件、Premiere 加载、短视频分析、重算、EDL 和取消。

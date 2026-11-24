@@ -75,6 +75,17 @@ powershellEnv.PSModulePath = [
         console.log(failure || 'Install', expectSuccess ? 'passed' : 'failed as expected');
         return result.stdout + result.stderr;
     };
+    // Real end-user batch entry. The offline ZIP launcher adds -Offline itself.
+    const runOfflineBatch = (packageRoot, sandbox, expectSuccess) => {
+        const result = spawnSync('cmd.exe', ['/d', '/c', 'call', path.join(packageRoot, 'setup.bat'),
+            '-SandboxRoot', sandbox, '-TestNoNetwork'],
+            { cwd: packageRoot, env: powershellEnv, encoding: 'utf8', input: '', timeout: 240000 });
+        if ((result.status === 0) !== expectSuccess) {
+            throw new Error('Offline batch entry ' + (expectSuccess ? 'failed' : 'unexpectedly succeeded') +
+                ' (' + result.status + '):\n' + result.stdout + '\n' + result.stderr);
+        }
+        return (result.stdout || '') + (result.stderr || '');
+    };
     const original = fs.readFileSync(cfgPath);
     const psVersion = spawnSync('powershell.exe', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { env: powershellEnv, encoding: 'utf8' });
     assert.equal(psVersion.status, 0);
@@ -214,6 +225,127 @@ powershellEnv.PSModulePath = [
     const stableVersions = versions();
     run('', true);
     assert.deepEqual(versions(), stableVersions);
+    // ------------------------------------------------------------------
+    //  Real offline ZIP: isolated node tools/package.js --offline build,
+    //  real extraction, generated batch entry (launcher adds -Offline).
+    // ------------------------------------------------------------------
+    const offlineBuildRoot = path.join(temp, 'isolated real build');
+    fs.mkdirSync(offlineBuildRoot);
+    for (const name of ['tools', 'cep-extension', 'backend', 'docs']) {
+        fs.cpSync(path.join(root, name), path.join(offlineBuildRoot, name), { recursive: true });
+    }
+    fs.copyFileSync(path.join(root, 'LICENSE'), path.join(offlineBuildRoot, 'LICENSE'));
+    const extensionVersion = require('./manifest')
+        .parseManifest(fs.readFileSync(path.join(root, 'cep-extension/CSXS/manifest.xml'), 'utf8')).version;
+    const offlineBuild = spawnSync(process.execPath, [path.join(offlineBuildRoot, 'tools/package.js'), '--offline'], {
+        cwd: offlineBuildRoot,
+        env: { ...process.env, ARKNIGHT_TEST_DOWNLOAD_CACHE: cache },
+        encoding: 'utf8',
+        timeout: 300000
+    });
+    assert.equal(offlineBuild.status, 0, offlineBuild.stdout + offlineBuild.stderr);
+    const offlineZip = path.join(offlineBuildRoot, 'dist',
+        `arknight-pr-setup-offline-v${extensionVersion}-windows-x64.zip`);
+    assert(fs.existsSync(offlineZip), offlineBuild.stdout + offlineBuild.stderr);
+    const extractRoot = path.join(temp, 'extracted real offline ZIP 中文 [dir]');
+    const psQuote = value => "'" + value.replace(/'/g, "''") + "'";
+    const expand = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-Command', `Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(offlineZip)}, ${psQuote(extractRoot)})`],
+        { env: powershellEnv, encoding: 'utf8', timeout: 120000 });
+    assert.equal(expand.status, 0, expand.stdout + expand.stderr);
+    // The offline ZIP keeps the same root as the online setup ZIP.
+    const offlinePackage = path.join(extractRoot, 'arknight-pr-setup');
+    assert(fs.existsSync(path.join(offlinePackage, 'setup.ps1')));
+    assert(fs.existsSync(path.join(offlinePackage, 'panel/CSXS/manifest.xml')));
+    const offlineBat = fs.readFileSync(path.join(offlinePackage, 'setup.bat'), 'utf8');
+    assert.match(offlineBat, /setup\.ps1"\s+-Offline/);
+    assert(!/[\x80-\uffff]/.test(offlineBat), 'Offline batch entry must stay ASCII');
+    const offlineDepsBackup = path.join(temp, 'offline runtime deps backup');
+    fs.mkdirSync(offlineDepsBackup);
+    for (const item of [lock.python, ...lock.wheels]) {
+        fs.copyFileSync(path.join(offlinePackage, 'runtime-deps', item.filename),
+            path.join(offlineDepsBackup, item.filename));
+    }
+    const offlineSandbox = path.join(temp, '离线 sandbox');
+    const offlineCfg = path.join(offlineSandbox, 'profile/.arknight-pr/config.json');
+    const offlinePanel = path.join(offlineSandbox, 'roaming/Adobe/CEP/extensions/com.arknight.autoediting');
+    fs.mkdirSync(path.dirname(offlineCfg), { recursive: true });
+    fs.writeFileSync(offlineCfg, JSON.stringify({ custom: { retained: true }, pythonPath: null, cliDir: null }));
+    fs.mkdirSync(offlinePanel, { recursive: true });
+    fs.writeFileSync(path.join(offlinePanel, 'old.txt'), 'old-panel');
+    // Empty cache: every archive must come from runtime-deps, with no network.
+    const offlineData = path.join(offlineSandbox, 'local/ArknightPR');
+    assert(!fs.existsSync(path.join(offlineData, 'cache')));
+    const offlineOutput = runOfflineBatch(offlinePackage, offlineSandbox, true);
+    for (let n = 1; n <= 6; n++) assert(offlineOutput.includes(`[${n}/6]`));
+    assert.match(offlineOutput, /离线模式/);
+    assert.match(offlineOutput, /离线安装包完整性预检通过/);
+    assert.doesNotMatch(offlineOutput, /开始：下载/);
+    const offlineConfig = JSON.parse(fs.readFileSync(offlineCfg, 'utf8'));
+    assert.equal(offlineConfig.custom.retained, true);
+    assert(fs.existsSync(offlineConfig.pythonPath));
+    assert(fs.existsSync(path.join(offlineConfig.cliDir, 'pr_cli.py')));
+    assert(fs.existsSync(path.join(offlinePanel, 'index.html')));
+    assert(!fs.existsSync(path.join(offlinePanel, 'old.txt')));
+    const offlineCache = path.join(offlineData, 'cache');
+    for (const item of [lock.python, ...lock.wheels]) {
+        const bytes = fs.readFileSync(path.join(offlineCache, item.filename));
+        assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), item.sha256);
+    }
+    const offlineImports = spawnSync(offlineConfig.pythonPath,
+        ['-I', '-c', 'import numpy, cv2; print(numpy.__version__); print(cv2.__version__)'],
+        { encoding: 'utf8' });
+    assert.equal(offlineImports.status, 0, offlineImports.stdout + offlineImports.stderr);
+    assert.match(offlineImports.stdout, /2\.2\.3/);
+    assert.match(offlineImports.stdout, /4\.11\.0/);
+    const offlineConfigBytes = fs.readFileSync(offlineCfg);
+    const offlineVersions = fs.readdirSync(path.join(offlineData, 'versions'));
+    const offlinePanelIndex = fs.readFileSync(path.join(offlinePanel, 'index.html'));
+    // A healthy cache must not hide a tampered packaged archive: fail with an
+    // actionable error before changing panel/backend/config or versions.
+    const offlineWheel = path.join(offlinePackage, 'runtime-deps', lock.wheels[0].filename);
+    fs.appendFileSync(offlineWheel, 'tampered offline package');
+    const corruptOffline = runOfflineBatch(offlinePackage, offlineSandbox, false);
+    assert.match(corruptOffline, /离线安装包已损坏或被修改/);
+    assert(corruptOffline.includes('runtime-deps\\' + lock.wheels[0].filename));
+    assert.match(corruptOffline, /SHA256/);
+    assert.doesNotMatch(corruptOffline, /开始：下载/);
+    assert.deepEqual(fs.readFileSync(offlineCfg), offlineConfigBytes);
+    assert.deepEqual(fs.readdirSync(path.join(offlineData, 'versions')), offlineVersions);
+    assert.deepEqual(fs.readFileSync(path.join(offlinePanel, 'index.html')), offlinePanelIndex);
+    fs.copyFileSync(path.join(offlineDepsBackup, lock.wheels[0].filename), offlineWheel);
+    // Missing packaged archive, still with a healthy cache.
+    fs.rmSync(offlineWheel);
+    const missingOffline = runOfflineBatch(offlinePackage, offlineSandbox, false);
+    assert.match(missingOffline, /离线安装包不完整/);
+    assert.match(missingOffline, /缺少 runtime-deps/);
+    assert.doesNotMatch(missingOffline, /开始：下载/);
+    assert.deepEqual(fs.readFileSync(offlineCfg), offlineConfigBytes);
+    assert.deepEqual(fs.readdirSync(path.join(offlineData, 'versions')), offlineVersions);
+    fs.copyFileSync(path.join(offlineDepsBackup, lock.wheels[0].filename), offlineWheel);
+    // Entire runtime-deps directory missing: same actionable contract.
+    const offlineDepsDir = path.join(offlinePackage, 'runtime-deps');
+    fs.renameSync(offlineDepsDir, offlineDepsDir + '-hidden');
+    const noDepsOffline = runOfflineBatch(offlinePackage, offlineSandbox, false);
+    assert.match(noDepsOffline, /未找到 runtime-deps 目录/);
+    assert.doesNotMatch(noDepsOffline, /开始：下载/);
+    assert.deepEqual(fs.readFileSync(offlineCfg), offlineConfigBytes);
+    fs.renameSync(offlineDepsDir + '-hidden', offlineDepsDir);
+    // Missing archive with an empty cache must fail before creating install state.
+    const emptyOfflineSandbox = path.join(temp, 'offline empty sandbox');
+    const emptyOfflineCfg = path.join(emptyOfflineSandbox, 'profile/.arknight-pr/config.json');
+    fs.mkdirSync(path.dirname(emptyOfflineCfg), { recursive: true });
+    fs.writeFileSync(emptyOfflineCfg, JSON.stringify({ custom: { retained: true } }));
+    const emptyConfigBytes = fs.readFileSync(emptyOfflineCfg);
+    fs.rmSync(path.join(offlinePackage, 'runtime-deps', lock.python.filename));
+    const emptyMissing = runOfflineBatch(offlinePackage, emptyOfflineSandbox, false);
+    assert.match(emptyMissing, /离线安装包不完整/);
+    assert.deepEqual(fs.readFileSync(emptyOfflineCfg), emptyConfigBytes);
+    assert(!fs.existsSync(path.join(emptyOfflineSandbox, 'local/ArknightPR/versions')));
+    assert(!fs.existsSync(path.join(emptyOfflineSandbox, 'local/ArknightPR/cache')));
+    fs.copyFileSync(path.join(offlineDepsBackup, lock.python.filename),
+        path.join(offlinePackage, 'runtime-deps', lock.python.filename));
+    console.log('Offline ZIP passed: isolated real package.js --offline build, arknight-pr-setup root, generated batch entry, empty cache, cv2/numpy, missing/corrupt runtime-deps preservation.');
     // Download failure and waiting diagnostics against a local isolated HTTP server.
     const lockPath = path.join(packageDir, 'runtime-lock.json');
     const originalLock = fs.readFileSync(lockPath);

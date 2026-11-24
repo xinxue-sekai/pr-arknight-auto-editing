@@ -16,6 +16,42 @@ const DIST = path.join(ROOT, 'dist');
 const xml = fs.readFileSync(MANIFEST, 'utf8');
 const { version } = require('./manifest').parseManifest(xml);
 
+/**
+ * v0.2.0 是最后一份不含离线安装包的 Release。之后的版本都要求在发布前
+ * 生成并校验 arknight-pr-setup-offline-v<version>-windows-x64.zip。
+ */
+const OFFLINE_SINCE = [0, 2, 1];
+
+function atLeast(value, minimum) {
+    const a = value.split('.').map(Number);
+    const b = minimum;
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const x = a[i] || 0;
+        const y = b[i] || 0;
+        if (x !== y) return x > y;
+    }
+    return true;
+}
+
+function expectedAssets() {
+    const assets = [
+        'arknight-pr-setup-v' + version + '-windows-x64.zip',
+        'com.arknight.autoediting-v' + version + '.zip'
+    ];
+    if (atLeast(version, OFFLINE_SINCE)) {
+        assets.push('arknight-pr-setup-offline-v' + version + '-windows-x64.zip');
+    }
+    return assets;
+}
+
+function checkAssets() {
+    const assets = expectedAssets();
+    for (const name of assets) {
+        if (!fs.existsSync(path.join(DIST, name))) throw new Error('Missing release asset: ' + name);
+    }
+    console.log('Release assets present: ' + assets.join(', '));
+}
+
 function checkTag(tag) {
     const expected = 'v' + version;
     console.log('tag = ' + tag);
@@ -28,14 +64,8 @@ function checkTag(tag) {
 
 function writeNotes(outPath) {
     const notesFile = path.join(ROOT, 'docs', 'releases', 'v' + version + '.md');
-    const expectedAssets = [
-        'arknight-pr-setup-v' + version + '-windows-x64.zip',
-        'com.arknight.autoediting-v' + version + '.zip'
-    ];
     if (fs.existsSync(notesFile)) {
-        for (const name of expectedAssets) {
-            if (!fs.existsSync(path.join(DIST, name))) throw new Error('Missing release asset: ' + name);
-        }
+        checkAssets();
         const notes = fs.readFileSync(notesFile, 'utf8').replace(/\]\((\.\.\/[^)]+)\)/g, (match, target) => {
             const resolved = path.resolve(path.dirname(notesFile), target);
             const relative = path.relative(ROOT, resolved).split(path.sep).join('/');
@@ -52,10 +82,13 @@ function writeNotes(outPath) {
 const mode = process.argv[2];
 if (mode === '--check-tag') {
     checkTag(process.argv[3] || '');
+} else if (mode === '--check-assets') {
+    checkAssets();
 } else if (mode === '--write-notes') {
     writeNotes(process.argv[3] || path.join(ROOT, 'release-notes.md'));
 } else {
     console.error('用法: node tools/release-info.js --check-tag v0.1.1');
+    console.error('      node tools/release-info.js --check-assets');
     console.error('      node tools/release-info.js --write-notes release-notes.md');
     process.exit(2);
 }

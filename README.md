@@ -17,8 +17,8 @@
 
 请先读这一节再决定要不要用。
 
-当前版本 **0.2.0** 新增内置后端、统一 Windows 安装器及视频预览，仍处于 0.x。
-完整变更见 [发布说明](docs/releases/v0.2.0.md)。
+当前版本 **0.2.1** 新增 Windows x64 离线安装包，在线安装、内置后端与视频预览沿用 v0.2.0，仍处于 0.x。
+完整变更见 [v0.2.1 发布说明](docs/releases/v0.2.1.md)；历史 v0.2.0 说明保留在 [v0.2.0](docs/releases/v0.2.0.md)。
 
 **已记录的验证（2026-11-08）**
 
@@ -104,11 +104,14 @@ Windows 多 Python 环境请将依赖安装到面板实际选择的解释器；`
 
 ### 完整安装：双击 setup.bat（推荐）
 
-1. 关闭 Premiere，将最新 `arknight-pr-setup-v<版本>-windows-x64.zip` 完整解压到一个新目录，避免误开之前解压的旧安装器。
-2. 打开其中的 `arknight-pr-setup` 文件夹，双击 **`setup.bat`**。
-3. 窗口会显示检测、复用、下载、验证和安装各阶段；出现“安装完成”后再启动 Premiere。
+1. 网络正常：下载最新 `arknight-pr-setup-v<版本>-windows-x64.zip`。网络慢、被阻断或在线安装下载超时：下载 `arknight-pr-setup-offline-v<版本>-windows-x64.zip`，它额外包含 `runtime-deps/`，安装不联网。离线包从 v0.2.1 起提供；历史 v0.2.0 只有在线包。
+2. 关闭 Premiere，将 zip 完整解压到一个新目录，避免误开之前解压的旧安装器。
+3. 打开其中的 `arknight-pr-setup` 文件夹，双击 **`setup.bat`**。
+4. 窗口会显示检测、复用、校验（在线包还会下载缺失归档）、验证和安装各阶段；出现“安装完成”后再启动 Premiere。
 
-已有 Python 的用户也使用此入口。安装器检测插件专用环境：健康组件复用，缺失或损坏组件才准备；完整性必须依据锁定 SHA256 的可信原始归档核对，不信任本地清单或仅 import 成功。缓存缺失时仍须下载归档用于核对；无可信归档且断网时停止。仅面板或 backend 内容更新不重新下载运行时。首次缺少缓存时需要联网，此包不是离线包。
+已有 Python 的用户也使用此入口。安装器检测插件专用环境：健康组件复用，缺失或损坏组件才准备；完整性必须依据锁定 SHA256 的可信原始归档核对，不信任本地清单或仅 import 成功。在线包首次缺少缓存时需要联网；离线包只使用包内归档或其已校验缓存，缺件或哈希不符时直接报错，不回退联网。仅面板或 backend 内容更新不重新下载运行时。
+
+v0.2.1 提供离线包。若仍在安装历史 v0.2.0（没有离线包），且在线下载 Python/NumPy/OpenCV 超过 15 分钟，按[安装说明的手工缓存办法](docs/installation-options.md#v020-下载超时的手工缓存办法)手工下载、核对 SHA256 并使用 `-DownloadCache`。
 
 安装器准备独立 Python、NumPy/OpenCV、内置 backend 和模板，不修改系统 Python 或 PATH；健康检查通过后更新 `pythonPath`/`cliDir`，升级失败恢复旧配置与文件。位置、许可、备份恢复及验证范围见 [Windows 安装说明](docs/installation-options.md)。
 
@@ -253,6 +256,10 @@ Premiere 的插件 API —— **ExtendScript 与 UXP 都一样** —— 没有�
 
 在分析器目录执行 `pip install numpy opencv-python`。
 
+**安装时 Python/NumPy/OpenCV 下载卡住或超过 15 分钟**
+
+优先改用 v0.2.1 的离线 setup（`arknight-pr-setup-offline-v<版本>-windows-x64.zip`），它不联网。历史 v0.2.0 没有离线包；若仍需安装 v0.2.0，请按[安装说明的手工缓存办法](docs/installation-options.md#v020-下载超时的手工缓存办法)手工下载三个锁定文件、核对 SHA256 后再用 `-DownloadCache` 安装。
+
 **落地时报「无法创建目标序列」**
 
 `createSubClip` / `createNewSequenceFromClips` 在当前 PR 版本上不可用。
@@ -316,7 +323,8 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 ```
 
 上述检查均已接入 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)），
-在 Ubuntu 与 Windows 上运行。宿主测试使用模拟 API，不替代 Premiere 真机回归。检查项都是针对本项目踩过的坑：
+在 Ubuntu 与 Windows 上运行。Release workflow 额外运行 `node tools/package.js --offline`
+生成离线 setup，并用 `node tools/verify-package.js --offline` 核对 runtime-deps 的锁定 SHA256。宿主测试使用模拟 API，不替代 Premiere 真机回归。检查项都是针对本项目踩过的坑：
 
 | 检查 | 为什么必须要 |
 |---|---|
@@ -362,8 +370,9 @@ node tools/verify-package.js  # 校验打出来的包（须先跑上一条）
 │   ├── check.js                 # 静态校验（与 CI 同一份，可本地跑）
 │   ├── test-bridge.js           # bridge.js 行为测试
 │   ├── check-links.js           # 文档相对链接检查
-│   ├── package.js               # 打包成可分发的 zip
-│   ├── verify-package.js        # 校验打出来的包结构
+│   ├── package.js               # 打包面板 / 在线 / 离线产物
+│   ├── package-offline.js       # 离线 setup 构建助手（runtime-deps）
+│   ├── verify-package.js        # 校验面板、setup 与离线包结构/哈希
 │   └── make-zxp.js              # 签名为 .zxp（可选分发形态）
 └── cep-extension/
     ├── CSXS/manifest.xml        # 扩展清单：PPRO [15.0,99.9]、CSXS 11.0

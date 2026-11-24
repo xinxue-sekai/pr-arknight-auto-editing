@@ -16,6 +16,9 @@
  * 用法：
  *   node tools/package.js              → dist/com.arknight.autoediting.zip
  *   node tools/package.js --keep-debug → 保留 .debug（自用调试包）
+ *   node tools/package.js --offline    → 普通在线产物 + 离线 setup ZIP
+ *                                         （离线包 = 同一暂存结构 + 锁定
+ *                                          runtime-deps/ + 离线 setup.bat）
  */
 'use strict';
 
@@ -27,156 +30,181 @@ const SRC = path.join(ROOT, 'cep-extension');
 const DIST = path.join(ROOT, 'dist');
 
 const KEEP_DEBUG = process.argv.indexOf('--keep-debug') >= 0;
+const OFFLINE = process.argv.indexOf('--offline') >= 0;
 
-// 扩展 Id 以 manifest 为唯一来源，避免两处手写不一致
-const manifestXml = fs.readFileSync(path.join(SRC, 'CSXS', 'manifest.xml'), 'utf8');
-const { bundleId: EXT_ID, version: VERSION } = require('./manifest').parseManifest(manifestXml);
-
-const STAGE = path.join(DIST, EXT_ID);
-
-// ------------------------------------------------------------------
-
-function rmrf(p) {
-    if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); }
+// 普通调用保持原有行为，只产出面板 ZIP；--offline 是显式构建模式：
+// 先由 package-setup.js 产出普通面板/在线 setup 包，再由 package-offline.js
+// 在同一暂存内容上追加锁定依赖与离线入口。
+if (OFFLINE) {
+    startOfflineBuild();
+} else {
+    buildPanelPackage();
 }
 
-/** 递归复制，按回调决定是否跳过某个条目（rel 为相对 SRC 的 POSIX 路径）。 */
-function copyFiltered(srcDir, destDir, shouldSkip, relBase) {
-    fs.mkdirSync(destDir, { recursive: true });
-    for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-        const rel = relBase ? relBase + '/' + entry.name : entry.name;
-        if (shouldSkip(rel, entry)) { continue; }
+function startOfflineBuild() {
+    if (KEEP_DEBUG) {
+        console.warn('注意：--offline 复用 package-setup.js 的普通构建，--keep-debug 不会作用于该模式。');
+    }
+    require('./package-offline').buildOfflinePackage().then(
+        () => {},
+        error => {
+            console.error('\n离线打包中止：' + (error && error.message ? error.message : error));
+            process.exitCode = 1;
+        }
+    );
+}
 
-        const s = path.join(srcDir, entry.name);
-        const d = path.join(destDir, entry.name);
-        if (entry.isDirectory()) {
-            copyFiltered(s, d, shouldSkip, rel);
-        } else {
-            fs.copyFileSync(s, d);
+function buildPanelPackage() {
+    // 扩展 Id 以 manifest 为唯一来源，避免两处手写不一致
+    const manifestXml = fs.readFileSync(path.join(SRC, 'CSXS', 'manifest.xml'), 'utf8');
+    const { bundleId: EXT_ID, version: VERSION } = require('./manifest').parseManifest(manifestXml);
+
+    const STAGE = path.join(DIST, EXT_ID);
+
+    // ------------------------------------------------------------------
+
+    function rmrf(p) {
+        if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); }
+    }
+
+    /** 递归复制，按回调决定是否跳过某个条目（rel 为相对 SRC 的 POSIX 路径）。 */
+    function copyFiltered(srcDir, destDir, shouldSkip, relBase) {
+        fs.mkdirSync(destDir, { recursive: true });
+        for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+            const rel = relBase ? relBase + '/' + entry.name : entry.name;
+            if (shouldSkip(rel, entry)) { continue; }
+
+            const s = path.join(srcDir, entry.name);
+            const d = path.join(destDir, entry.name);
+            if (entry.isDirectory()) {
+                copyFiltered(s, d, shouldSkip, rel);
+            } else {
+                fs.copyFileSync(s, d);
+            }
         }
     }
-}
 
-function humanSize(bytes) {
-    if (bytes < 1024) { return bytes + ' B'; }
-    if (bytes < 1024 * 1024) { return (bytes / 1024).toFixed(1) + ' KB'; }
-    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
-}
-
-function dirSize(p) {
-    let total = 0;
-    for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
-        const abs = path.join(p, entry.name);
-        total += entry.isDirectory() ? dirSize(abs) : fs.statSync(abs).size;
+    function humanSize(bytes) {
+        if (bytes < 1024) { return bytes + ' B'; }
+        if (bytes < 1024 * 1024) { return (bytes / 1024).toFixed(1) + ' KB'; }
+        return (bytes / 1024 / 1024).toFixed(2) + ' MB';
     }
-    return total;
-}
 
-// ------------------------------------------------------------------
-//  1. 暂存
-// ------------------------------------------------------------------
-
-console.log(`\n打包 ${EXT_ID} v${VERSION}${KEEP_DEBUG ? '（保留 .debug）' : ''}\n`);
-
-rmrf(STAGE);
-fs.mkdirSync(DIST, { recursive: true });
-
-const skipped = [];
-const shouldSkip = (rel, entry) => {
-    // 顶层 install 目录
-    if (rel === 'install') { skipped.push('install/'); return true; }
-    // .debug（除非显式保留）
-    if (!KEEP_DEBUG && rel === '.debug') { skipped.push('.debug'); return true; }
-    // 各类垃圾
-    if (entry.isDirectory() && (entry.name === '__pycache__' || entry.name === '.git')) {
-        skipped.push(rel + '/');
-        return true;
+    function dirSize(p) {
+        let total = 0;
+        for (const entry of fs.readdirSync(p, { withFileTypes: true })) {
+            const abs = path.join(p, entry.name);
+            total += entry.isDirectory() ? dirSize(abs) : fs.statSync(abs).size;
+        }
+        return total;
     }
-    if (entry.name === '.DS_Store' || entry.name === 'Thumbs.db') {
-        skipped.push(rel);
-        return true;
+
+    // ------------------------------------------------------------------
+    //  1. 暂存
+    // ------------------------------------------------------------------
+
+    console.log(`\n打包 ${EXT_ID} v${VERSION}${KEEP_DEBUG ? '（保留 .debug）' : ''}\n`);
+
+    rmrf(STAGE);
+    fs.mkdirSync(DIST, { recursive: true });
+
+    const skipped = [];
+    const shouldSkip = (rel, entry) => {
+        // 顶层 install 目录
+        if (rel === 'install') { skipped.push('install/'); return true; }
+        // .debug（除非显式保留）
+        if (!KEEP_DEBUG && rel === '.debug') { skipped.push('.debug'); return true; }
+        // 各类垃圾
+        if (entry.isDirectory() && (entry.name === '__pycache__' || entry.name === '.git')) {
+            skipped.push(rel + '/');
+            return true;
+        }
+        if (entry.name === '.DS_Store' || entry.name === 'Thumbs.db') {
+            skipped.push(rel);
+            return true;
+        }
+        return false;
+    };
+
+    copyFiltered(SRC, STAGE, shouldSkip, '');
+    fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(STAGE, 'LICENSE'));
+
+    console.log('已暂存到 dist/' + EXT_ID + '/');
+    if (skipped.length) {
+        console.log('已剔除：' + skipped.join(', '));
     }
-    return false;
-};
 
-copyFiltered(SRC, STAGE, shouldSkip, '');
-fs.copyFileSync(path.join(ROOT, 'LICENSE'), path.join(STAGE, 'LICENSE'));
+    // ------------------------------------------------------------------
+    //  2. 打包前校验：包里必须有的东西
+    // ------------------------------------------------------------------
 
-console.log('已暂存到 dist/' + EXT_ID + '/');
-if (skipped.length) {
-    console.log('已剔除：' + skipped.join(', '));
+    const REQUIRED = [
+        'CSXS/manifest.xml',
+        'index.html',
+        'hostscript.jsx',
+        'js/main.js',
+        'js/bridge.js',
+        'js/timeline.js',
+        'js/preview.js',
+        'js/preview-bridge.js',
+        'LICENSE',
+        'js/csinterface.js',
+        'css/style.css'
+    ];
+
+    let missing = [];
+    for (const rel of REQUIRED) {
+        if (!fs.existsSync(path.join(STAGE, rel))) { missing.push(rel); }
+    }
+    if (missing.length) {
+        console.error('\n打包中止：暂存目录缺少必需文件：');
+        for (const m of missing) { console.error('  - ' + m); }
+        process.exit(1);
+    }
+    console.log(`必需文件齐备（${REQUIRED.length} 项）`);
+
+    // 包的目录名必须等于 Id，否则 CEP 不认
+    if (path.basename(STAGE) !== EXT_ID) {
+        console.error(`\n打包中止：目录名 ${path.basename(STAGE)} != manifest Id ${EXT_ID}`);
+        process.exit(1);
+    }
+
+    // ------------------------------------------------------------------
+    //  3. 压缩
+    // ------------------------------------------------------------------
+
+    const zipName = `${EXT_ID}-v${VERSION}${KEEP_DEBUG ? '-debug' : ''}.zip`;
+    const zipPath = path.join(DIST, zipName);
+
+    // ------------------------------------------------------------------
+    //  3. 压缩（内置写入器）
+    // ------------------------------------------------------------------
+
+    /**
+     * 为什么手写 zip 而不调外部工具 —— 每个都有坑（都实测踩过）：
+     *   zip           Windows 上通常没有
+     *   GNU tar -a    对 .zip 后缀不认识，却不报错、静默产出纯 tar
+     *   Compress-Archive / python -m zipfile
+     *                 在 Windows 上用反斜杠做条目路径分隔符，zip 规范
+     *                 要求 /，Linux/macOS 的 unzip 会解出文件名里带
+     *                 字面反斜杠的散文件
+     * 内置写入器零依赖、全平台产物一致；verify-package.js 用另一套
+     * 代码独立解析校验，防这里写错。
+     */
+    const { writeZip } = require('./zip');
+
+    const fileCount = writeZip(STAGE, zipPath);
+
+    const zipSize = fs.statSync(zipPath).size;
+    const stageSize = dirSize(STAGE);
+
+    console.log(`\n产物：dist/${zipName}`);
+    console.log(`内容：${humanSize(stageSize)} → 压缩后 ${humanSize(zipSize)}（${fileCount} 个文件）`);
+    console.log('\n使用方式（分发给用户时写进 Release 说明）：');
+    console.log(`  1. 解压出 ${EXT_ID} 文件夹`);
+    console.log('  2. 整个文件夹放进 %APPDATA%\\Adobe\\CEP\\extensions\\');
+    console.log(`     即 …\\Roaming\\Adobe\\CEP\\extensions\\${EXT_ID}\\CSXS\\manifest.xml`);
+    console.log('  3. 开启 PlayerDebugMode（见仓库 README），然后重启 Premiere Pro');
+    console.log('  4. 菜单：窗口 → 扩展 → Arknight Auto Editing');
+    console.log('');
 }
-
-// ------------------------------------------------------------------
-//  2. 打包前校验：包里必须有的东西
-// ------------------------------------------------------------------
-
-const REQUIRED = [
-    'CSXS/manifest.xml',
-    'index.html',
-    'hostscript.jsx',
-    'js/main.js',
-    'js/bridge.js',
-    'js/timeline.js',
-    'js/preview.js',
-    'js/preview-bridge.js',
-    'LICENSE',
-    'js/csinterface.js',
-    'css/style.css'
-];
-
-let missing = [];
-for (const rel of REQUIRED) {
-    if (!fs.existsSync(path.join(STAGE, rel))) { missing.push(rel); }
-}
-if (missing.length) {
-    console.error('\n打包中止：暂存目录缺少必需文件：');
-    for (const m of missing) { console.error('  - ' + m); }
-    process.exit(1);
-}
-console.log(`必需文件齐备（${REQUIRED.length} 项）`);
-
-// 包的目录名必须等于 Id，否则 CEP 不认
-if (path.basename(STAGE) !== EXT_ID) {
-    console.error(`\n打包中止：目录名 ${path.basename(STAGE)} != manifest Id ${EXT_ID}`);
-    process.exit(1);
-}
-
-// ------------------------------------------------------------------
-//  3. 压缩
-// ------------------------------------------------------------------
-
-const zipName = `${EXT_ID}-v${VERSION}${KEEP_DEBUG ? '-debug' : ''}.zip`;
-const zipPath = path.join(DIST, zipName);
-
-// ------------------------------------------------------------------
-//  3. 压缩（内置写入器）
-// ------------------------------------------------------------------
-
-/**
- * 为什么手写 zip 而不调外部工具 —— 每个都有坑（都实测踩过）：
- *   zip           Windows 上通常没有
- *   GNU tar -a    对 .zip 后缀不认识，却不报错、静默产出纯 tar
- *   Compress-Archive / python -m zipfile
- *                 在 Windows 上用反斜杠做条目路径分隔符，zip 规范
- *                 要求 /，Linux/macOS 的 unzip 会解出文件名里带
- *                 字面反斜杠的散文件
- * 内置写入器零依赖、全平台产物一致；verify-package.js 用另一套
- * 代码独立解析校验，防这里写错。
- */
-const { writeZip } = require('./zip');
-
-const fileCount = writeZip(STAGE, zipPath);
-
-const zipSize = fs.statSync(zipPath).size;
-const stageSize = dirSize(STAGE);
-
-console.log(`\n产物：dist/${zipName}`);
-console.log(`内容：${humanSize(stageSize)} → 压缩后 ${humanSize(zipSize)}（${fileCount} 个文件）`);
-console.log('\n使用方式（分发给用户时写进 Release 说明）：');
-console.log(`  1. 解压出 ${EXT_ID} 文件夹`);
-console.log('  2. 整个文件夹放进 %APPDATA%\\Adobe\\CEP\\extensions\\');
-console.log(`     即 …\\Roaming\\Adobe\\CEP\\extensions\\${EXT_ID}\\CSXS\\manifest.xml`);
-console.log('  3. 开启 PlayerDebugMode（见仓库 README），然后重启 Premiere Pro');
-console.log('  4. 菜单：窗口 → 扩展 → Arknight Auto Editing');
-console.log('');

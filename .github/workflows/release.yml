@@ -1,6 +1,8 @@
 name: Release
 
 # 打 tag 即发布：把扩展打成 zip，创建 GitHub Release 并把 zip 作为 asset 上传。
+# v0.2.0 之后的 Release 还必须包含离线 setup 附件；发布前会校验附件存在，
+# 并逐字节核对 setup 内容、runtime-deps/ 文件名与锁定 SHA256。
 #
 # 发布方式：
 #   1. 改 cep-extension/CSXS/manifest.xml 里的 ExtensionBundle@Version
@@ -55,14 +57,26 @@ jobs:
       - name: 校验 tag 与 manifest 版本一致
         run: node tools/release-info.js --check-tag "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
 
-      - name: 打包
+      - name: 打包面板
         run: node tools/package.js
+
+      - name: 打包离线 setup
+        run: node tools/package.js --offline
 
       - name: 签名 zxp
         # 临时自签名证书，用完即删 —— 私钥与密码不进仓库、不进 secrets。
         # 自签名的代价：用户安装时会看到「发布者不受信任」提示；
         # zip 仍是主推分发方式，zxp 只是给 ZXP 安装器用户的可选形态。
         run: node tools/make-zxp.js
+
+      - name: 校验面板、在线与离线 setup 附件（含锁定依赖 SHA256）
+        run: |
+          node tools/verify-package.js
+          node tools/verify-package.js --setup
+          node tools/verify-package.js --offline
+
+      - name: 校验预期 Release 附件存在
+        run: node tools/release-info.js --check-assets
 
       - name: 生成 Release 说明
         run: node tools/release-info.js --write-notes release-notes.md

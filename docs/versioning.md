@@ -63,12 +63,16 @@
 4. 本地跑全套检查（见 CONTRIBUTING.md）
 5. git commit -m "release: vX.Y.Z"（或描述性中文信息）
 6. git tag -a vX.Y.Z -m "..." && git push origin main --follow-tags
-7. release workflow 自动：跑检查 → 校验 tag/manifest 一致 → 打包 → 建 Release 上传 zip
-8. 到 GitHub Releases 页确认 zip asset 已上传、说明内容正确
+7. release workflow 自动：跑检查 → 校验 tag/manifest 一致 → 打包面板/在线 setup/离线 setup → 校验预期附件与锁定运行时哈希 → 建 Release 上传 zip 与 zxp
+8. 到 GitHub Releases 页确认在线与离线 setup、面板 zip/zxp 均已上传，说明内容正确
 ```
 
 **注意**：`--follow-tags` 只推送 annotated tag；忘了推 tag Release 就不会触发，
 事后单独 `git push origin vX.Y.Z` 即可补发。
+
+v0.2.0 是最后一份不含离线 setup 的 Release。`tools/release-info.js` 从
+v0.2.1 起把 `arknight-pr-setup-offline-v<版本>-windows-x64.zip` 列为必需附件，
+Release workflow 会先校验它和 `runtime-deps/` 的锁定 SHA256，再创建 Release。
 
 ## 迭代节奏
 

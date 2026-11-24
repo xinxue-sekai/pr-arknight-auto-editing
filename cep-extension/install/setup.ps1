@@ -3,7 +3,9 @@ param(
     [string]$SandboxRoot,
     [string]$DownloadCache,
     [ValidateSet('', 'AfterPanel', 'AfterConfig')][string]$TestFailure = '',
-    [switch]$TestNoNetwork
+    [switch]$TestNoNetwork,
+    # 离线模式：只使用与本脚本同目录的 runtime-deps\，不发起任何网络请求。
+    [switch]$Offline
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -15,6 +17,8 @@ if (($TestFailure -or $TestNoNetwork) -and -not $SandboxRoot) { throw 'Test opti
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $source = Split-Path -Parent $PSScriptRoot
+$offlineDeps = Join-Path $PSScriptRoot 'runtime-deps'
+$offlineFiles = @{}
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'panel')) {
     $panel = Join-Path $PSScriptRoot 'panel'
     $backend = Join-Path $PSScriptRoot 'backend'
@@ -84,20 +88,45 @@ function Same($a, $b) {
     return $true
 }
 function Valid($file, $item) { return ((Test-Path -LiteralPath $file -PathType Leaf) -and (Hash $file) -eq $item.sha256) }
+function Offline-Repack($detail) {
+    return "$detail 请重新下载官方离线 ZIP（arknight-pr-setup-offline-v$version-windows-x64.zip），完整解压后双击 setup.bat；本次未修改现有面板、后端或配置。"
+}
+function Offline-PackageFile($item) {
+    # Offline packages must prove completeness and integrity before any install
+    # step, even when the persistent download cache already holds a valid copy.
+    $file = Join-Path $offlineDeps $item.filename
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        throw (Offline-Repack "离线安装包不完整：缺少 runtime-deps\$($item.filename)。")
+    }
+    if (-not (Valid $file $item)) {
+        throw (Offline-Repack "离线安装包已损坏或被修改：runtime-deps\$($item.filename) 的 SHA256 与 runtime-lock.json 不一致。")
+    }
+    return $file
+}
 function Fetch-Verified($item) {
     Write-Host "开始：校验缓存 $($item.filename)"
     $stored = Join-Path $cache $item.filename
-    if (Valid $stored $item) { Write-Host "完成：缓存校验通过 $($item.filename)"; return $stored }
+    $seed = ''
+    $seedVerified = $false
+    if ($Offline) {
+        # Preflight already hashed every packaged file before install state was
+        # created. Reuse that result; the copied file is hashed again below.
+        $seed = $offlineFiles[$item.filename]
+        if (-not $seed -or -not (Test-Path -LiteralPath $seed -PathType Leaf)) { $seed = Offline-PackageFile $item }
+        $seedVerified = $true
+        if (Valid $stored $item) { Write-Host "完成：缓存校验通过 $($item.filename)"; return $stored }
+    } elseif (Valid $stored $item) { Write-Host "完成：缓存校验通过 $($item.filename)"; return $stored }
     if (Test-Path -LiteralPath $stored) { Write-Host '缓存损坏，重新获取。'; Remove-Item -LiteralPath $stored -Force }
-    # Each download has a new empty directory, separate from scripts and extraction.
+    # Each copy/download has a new empty directory, separate from scripts and extraction.
     $dir = Join-Path $work ([Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory $dir | Out-Null
     $file = Join-Path $dir $item.filename
-    $seed = if ($DownloadCache) { Join-Path $DownloadCache $item.filename } else { '' }
-    if ($seed -and (Valid $seed $item)) {
+    if (-not $Offline -and $DownloadCache) { $seed = Join-Path $DownloadCache $item.filename }
+    if ($seed -and ($seedVerified -or (Valid $seed $item))) {
         Write-Host "开始：复制已校验离线缓存 $($item.filename)"
         Copy-Item -LiteralPath $seed -Destination $file
     } else {
+        if ($Offline) { throw (Offline-Repack "离线模式无法从 runtime-deps 获得 $($item.filename)。") }
         if ($TestNoNetwork) { throw "Network disabled: $($item.filename) (缓存缺失或损坏)" }
         Write-Host "开始：下载 $($item.filename)，连接超时 30 秒、读取超时 30 秒、总限时 15 分钟"
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -147,7 +176,10 @@ function Fetch-Verified($item) {
             if ($outputStream) { $outputStream.Dispose() }; if ($inputStream) { $inputStream.Dispose() }; if ($response) { $response.Dispose() }
         }
     }
-    if (-not (Valid $file $item)) { throw "SHA256 mismatch: $($item.filename)" }
+    if (-not (Valid $file $item)) {
+        if ($Offline) { throw (Offline-Repack "离线安装包复制校验失败：runtime-deps\$($item.filename) 的 SHA256 与 runtime-lock.json 不一致。") }
+        throw "SHA256 mismatch: $($item.filename)"
+    }
     Move-Item -LiteralPath $file -Destination $stored -Force
     Write-Host "完成：SHA256 验证并保存缓存 $($item.filename)"
     return $stored
@@ -190,9 +222,19 @@ try {
         } catch { throw "配置文件损坏，必须是有效 JSON 对象（$cfg）：$($_.Exception.Message)" }
     }
     $configHash = if (Test-Path -LiteralPath $cfg) { Hash $cfg } else { '' }
-    New-Item -ItemType Directory -Force $work, $cache, $cfgDir, (Split-Path -Parent $ext) | Out-Null
     $lock = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime-lock.json') -Raw | ConvertFrom-Json
     $items = @($lock.python) + @($lock.wheels)
+    if ($Offline) {
+        # Preflight every packaged archive before creating installation state or
+        # touching the live panel/backend/config.
+        if (-not (Test-Path -LiteralPath $offlineDeps -PathType Container)) {
+            throw (Offline-Repack '离线安装包不完整：未找到 runtime-deps 目录（应与 setup.ps1 位于同一目录）。')
+        }
+        Write-Host '离线模式：仅使用 runtime-deps 中的归档，安装期间禁止网络请求'
+        foreach ($item in $items) { $offlineFiles[$item.filename] = Offline-PackageFile $item }
+        Write-Host '完成：离线安装包完整性预检通过'
+    }
+    New-Item -ItemType Directory -Force $work, $cache, $cfgDir, (Split-Path -Parent $ext) | Out-Null
     $oldRelease = ''; $oldPython = ''; $oldCli = ''
     if ($config.PSObject.Properties['pythonPath'] -and $config.PSObject.Properties['cliDir']) {
         $candidate = Config-AbsolutePath $config.pythonPath
